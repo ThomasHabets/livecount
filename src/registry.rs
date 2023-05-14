@@ -1,15 +1,14 @@
+use lazy_static::lazy_static;
 use log::{debug, warn};
+use prometheus::{IntGauge, Registry as PromReg};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
-use prometheus::{
-    Registry as PromReg,IntGauge,
-};
-use lazy_static::lazy_static;
 
 lazy_static! {
     pub static ref REGISTRY: PromReg = PromReg::new();
-    pub static ref TOTAL_ACTIVE: IntGauge = IntGauge::new("total_active", "Total active sessions").expect("metric can be created");
+    pub static ref TOTAL_ACTIVE: IntGauge =
+        IntGauge::new("total_active", "Total active sessions").expect("metric can be created");
 }
 
 #[cfg(test)]
@@ -60,16 +59,18 @@ pub enum Request {
 
 pub struct Registry {
     ch: mpsc::Sender<Request>,
-    join: tokio::task::JoinHandle<()>,
+    _join: tokio::task::JoinHandle<()>,
 }
 
 impl Registry {
     pub fn new() -> Registry {
-        REGISTRY.register(Box::new(TOTAL_ACTIVE.clone())).expect("can register");
+        REGISTRY
+            .register(Box::new(TOTAL_ACTIVE.clone()))
+            .expect("can register");
         let (tx, rx) = mpsc::channel(10);
         Registry {
             ch: tx.clone(),
-            join: tokio::spawn(async move { Self::main(tx.clone(), rx).await }),
+            _join: tokio::spawn(async move { Self::main(tx.clone(), rx).await }),
         }
     }
 
@@ -175,6 +176,6 @@ impl Registry {
     #[cfg(test)]
     pub async fn stop(self) -> Result<(), tokio::task::JoinError> {
         self.send(Request::Stop).await.expect("TODO");
-        self.join.await
+        self._join.await
     }
 }

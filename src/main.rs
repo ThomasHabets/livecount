@@ -65,7 +65,7 @@ async fn metrics_handler() -> Result<impl warp::Reply, warp::Rejection> {
 #[tokio::main]
 async fn main() {
     println!("Running");
-    
+
     let opt = Opt::from_args();
     stderrlog::new()
         .module(module_path!())
@@ -77,9 +77,10 @@ async fn main() {
     info!("Running");
 
     let reg = Arc::new(Registry::new());
-    let api = filters::livecount(reg.clone()).or(warp::path!("livecount"/"metrics").and_then(metrics_handler));
+    let api = filters::livecount(reg.clone())
+        .or(warp::path!("livecount" / "metrics").and_then(metrics_handler));
     let routes = api.with(warp::log("livecount"));
-    
+
     warp::serve(routes).run(([127, 0, 0, 1], 8000)).await;
     // reg.to_owned().stop().await.expect("failed to stop()");
 }
