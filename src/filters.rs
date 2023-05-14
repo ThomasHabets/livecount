@@ -4,7 +4,6 @@ use futures_util::{SinkExt, StreamExt};
 use log::{debug, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
-use warp;
 use warp::ws::Message;
 use warp::Filter;
 

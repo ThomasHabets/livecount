@@ -5,7 +5,6 @@
 */
 use log::info;
 use std::sync::Arc;
-use stderrlog;
 use structopt::StructOpt;
 use warp::Filter;
 //use prometheus

@@ -9,7 +9,7 @@ use lazy_static::lazy_static;
 
 lazy_static! {
     pub static ref REGISTRY: PromReg = PromReg::new();
-    pub static ref total_active: IntGauge = IntGauge::new("total_active", "Total active sessions").expect("metric can be created");
+    pub static ref TOTAL_ACTIVE: IntGauge = IntGauge::new("total_active", "Total active sessions").expect("metric can be created");
 }
 
 #[cfg(test)]
@@ -54,6 +54,7 @@ impl Handle {
 pub enum Request {
     Register(String, mpsc::Sender<Handle>),
     Unregister(Handle),
+    #[cfg(test)]
     Stop,
 }
 
@@ -64,7 +65,7 @@ pub struct Registry {
 
 impl Registry {
     pub fn new() -> Registry {
-        REGISTRY.register(Box::new(total_active.clone())).expect("can register");
+        REGISTRY.register(Box::new(TOTAL_ACTIVE.clone())).expect("can register");
         let (tx, rx) = mpsc::channel(10);
         Registry {
             ch: tx.clone(),
@@ -76,7 +77,7 @@ impl Registry {
         for id in set {
             debug!("Sending to id {}", id);
             let e = txm.get(id);
-            if let None = e {
+            if e.is_none() {
                 warn!("Wanted to publish to channel ID {}, but missing", id);
                 continue;
             }
@@ -113,14 +114,7 @@ impl Registry {
 
                     tx_map.insert(id, ctx);
                     debug!("After register: {} active connections", tx_map.len());
-                    match key_map.get(&key) {
-                        Some(set) => {
-                            Self::publish(&tx_map, set, u64::try_from(count).unwrap()).await
-                        }
-                        None => {
-                            warn!("CAN'T HAPPEN: I just put that in there, can't be empty")
-                        }
-                    }
+                    Self::publish(&tx_map, entry, u64::try_from(count).unwrap()).await;
                     if let Err(err) = ch.send(handle).await {
                         warn!("Failed to send handle back during register(): {}", err);
                     };
@@ -153,8 +147,9 @@ impl Registry {
                         }
                     }
                     debug!("After unregister: {} active connections", tx_map.len());
-                    total_active.set(i64::try_from(tx_map.len()).unwrap());
+                    TOTAL_ACTIVE.set(i64::try_from(tx_map.len()).unwrap());
                 }
+                #[cfg(test)]
                 Some(Request::Stop) => break,
                 None => {
                     warn!("control channel shutting down?");
@@ -177,6 +172,7 @@ impl Registry {
         self.ch.send(req).await
     }
 
+    #[cfg(test)]
     pub async fn stop(self) -> Result<(), tokio::task::JoinError> {
         self.send(Request::Stop).await.expect("TODO");
         self.join.await
