@@ -1,9 +1,13 @@
+use futures::{pin_mut, select};
+use futures_timer::Delay;
+use futures_util::FutureExt;
 use lazy_static::lazy_static;
 use log::{debug, warn};
 use prometheus::{IntGauge, Registry as PromReg};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
+use tokio::time::Duration;
 
 lazy_static! {
     pub static ref REGISTRY: PromReg = PromReg::new();
@@ -166,7 +170,15 @@ impl Registry {
             warn!("Failed to register: {}", err);
             return None;
         }
-        rx.recv().await
+        let rfut = rx.recv().fuse();
+        let tfut = Delay::new(Duration::from_millis(1000)).fuse();
+        pin_mut!(rfut, tfut);
+        select! {
+            ret = rfut => ret,
+            _ = tfut => {
+                panic!("Register timeout");
+            }
+        }
     }
 
     async fn send(&self, req: Request) -> Result<(), SendError<Request>> {
