@@ -73,7 +73,7 @@ async fn main() {
         .verbosity(opt.verbose)
         .timestamp(opt.ts.unwrap_or(stderrlog::Timestamp::Second))
         .init()
-        .unwrap();
+        .expect("Failed to initialize logging");
     info!("Running");
 
     let reg = Arc::new(Registry::new());

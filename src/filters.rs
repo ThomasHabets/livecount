@@ -46,29 +46,34 @@ pub fn livecount_ws(
                     let (mut tx, mut rx) = websocket.split();
 
                     let mut handle = reg.register(loc).await.unwrap();
-                    loop {
+                    {
                         let wsfut = rx.next().fuse();
-                        let hnfut = handle.next().fuse();
-                        pin_mut!(wsfut, hnfut);
-                        // TODO: I don't think this is right. This
-                        // discards the previous wait. Maybe it'll be
-                        // fine, since aside from closing the
-                        // websocket we don't expect anything from it.
-                        select! {
-                            msg = hnfut => {
-                                if let Some(msg) = msg {
-                                    if let Err(err) = tx.send(Message::text(format!("{}", msg))).await {
-                                        warn!("connection broken?: {:?}", err);
-                                        break
+                        pin_mut!(wsfut);
+                        loop {
+                            let hnfut = handle.next().fuse();
+                            pin_mut!(hnfut);
+                            //pin_mut!(wsfut, hnfut);
+                            // TODO: I don't think this is right. This
+                            // discards the previous wait. Maybe it'll be
+                            // fine, since aside from closing the
+                            // websocket we don't expect anything from it.
+                            select! {
+                                msg = hnfut => {
+                                    if let Some(msg) = msg {
+                                        let send = async_std::future::timeout(std::time::Duration::from_secs(5), tx.send(Message::text(format!("{}", msg))));
+                                        if let Err(err) = send.await {
+                                            warn!("connection broken?: {:?}", err);
+                                            break
+                                        }
                                     }
-                                }
-                            },
-                            wsmsg = wsfut => {
-                                debug!("Closing because got something from socket: {:?}", wsmsg);
-                                // Ok(Close(Some(CloseFrame { code: Away, reason: "" })))
-                                break
-                            },
-                        };
+                                },
+                                wsmsg = wsfut => {
+                                    debug!("Closing because got something from socket: {:?}", wsmsg);
+                                    // Ok(Close(Some(CloseFrame { code: Away, reason: "" })))
+                                    break
+                                },
+                            };
+                        }
                     }
                     debug!("WS Terminating");
                     handle.close().await;
