@@ -1,5 +1,3 @@
-use futures::{pin_mut, select};
-use futures_util::FutureExt;
 use futures_util::{SinkExt, StreamExt};
 use log::{debug, warn};
 use std::collections::HashMap;
@@ -44,18 +42,17 @@ async fn livecount_ws_map_upgrade(
 
     let mut handle = reg.register(loc).await.unwrap();
     {
-        let wsfut = rx.next().fuse();
-        pin_mut!(wsfut);
+        //let wsfut = rx.next().fuse();
         loop {
-            let hnfut = handle.next().fuse();
-            pin_mut!(hnfut);
+            //let hnfut = handle.next().fuse();
+
             //pin_mut!(wsfut, hnfut);
             // TODO: I don't think this is right. This
             // discards the previous wait. Maybe it'll be
             // fine, since aside from closing the
             // websocket we don't expect anything from it.
-            select! {
-                msg = hnfut => {
+            tokio::select! {
+                msg = handle.next() => {
                     if let Some(msg) = msg {
                         let send = async_std::future::timeout(std::time::Duration::from_secs(5), tx.send(Message::text(format!("{}", msg))));
                         if let Err(err) = send.await {
@@ -64,7 +61,7 @@ async fn livecount_ws_map_upgrade(
                         }
                     }
                 },
-                wsmsg = wsfut => {
+                wsmsg = rx.next() => {
                     debug!("Closing because got something from socket: {:?}", wsmsg);
                     // Ok(Close(Some(CloseFrame { code: Away, reason: "" })))
                     break

@@ -119,6 +119,7 @@ impl Registry {
 
                     tx_map.insert(id, ctx);
                     debug!("After register: {} active connections", tx_map.len());
+                    TOTAL_ACTIVE.set(i64::try_from(tx_map.len()).unwrap());
                     Self::publish(&tx_map, entry, u64::try_from(count).unwrap()).await;
                     if let Err(err) = ch.send(handle).await {
                         warn!("Failed to send handle back during register(): {}", err);
