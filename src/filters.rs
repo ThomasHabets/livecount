@@ -32,6 +32,10 @@ async fn livecount_ws_map_upgrade(
         Some(v) => v,
         None => "invalid",
     };
+    let loc = match loc.find('?') {
+        Some(pos) => &loc[..pos],
+        None => loc,
+    };
     debug!(
         "WS upgrade from {} {} by {}",
         origin,

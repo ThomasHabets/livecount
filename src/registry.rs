@@ -3,7 +3,7 @@ use futures_timer::Delay;
 use futures_util::FutureExt;
 use lazy_static::lazy_static;
 use log::{debug, error, warn};
-use prometheus::{IntGauge, Registry as PromReg};
+use prometheus::{IntGauge, IntGaugeVec, Registry as PromReg};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
@@ -14,7 +14,9 @@ const CHANNEL_SIZE: usize = 10_000;
 lazy_static! {
     pub static ref REGISTRY: PromReg = PromReg::new();
     pub static ref TOTAL_ACTIVE: IntGauge =
-        IntGauge::new("total_active", "Total active sessions").expect("metric can be created");
+        IntGauge::new("total_active", "Total active sessions").expect("metric can't be created");
+    pub static ref PAGE_ACTIVE: IntGaugeVec =
+        IntGaugeVec::new(prometheus::Opts::new("page_active", "Active sessions per page"), &["page"]).expect("metric could not be created");
 }
 
 #[cfg(test)]
@@ -72,7 +74,10 @@ impl Registry {
     pub fn new() -> Registry {
         REGISTRY
             .register(Box::new(TOTAL_ACTIVE.clone()))
-            .expect("can register");
+            .expect("failed to register");
+        REGISTRY
+            .register(Box::new(PAGE_ACTIVE.clone()))
+            .expect("failed to register");
         let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
         Registry {
             ch: tx.clone(),
@@ -120,8 +125,9 @@ impl Registry {
                     };
 
                     tx_map.insert(id, ctx);
-                    debug!("After register: {} active connections", tx_map.len());
+                    debug!("After register: {} active connections (key {key})", tx_map.len());
                     TOTAL_ACTIVE.set(i64::try_from(tx_map.len()).unwrap());
+                    PAGE_ACTIVE.with_label_values(&[&key]).inc();
                     Self::publish(&tx_map, entry, u64::try_from(count).unwrap()).await;
                     if let Err(err) = ch.send(handle).await {
                         warn!("Failed to send handle back during register(): {}", err);
@@ -134,7 +140,7 @@ impl Registry {
                     tx_map.remove(&handle.id);
                     let remaining = u64::try_from(
                         key_map
-                            .entry(key)
+                            .entry(key.clone())
                             .and_modify(|e| {
                                 e.remove(&handle.id);
                             })
@@ -155,6 +161,7 @@ impl Registry {
                         }
                     }
                     debug!("After unregister: {} active connections", tx_map.len());
+                    PAGE_ACTIVE.with_label_values(&[&key]).dec();
                     TOTAL_ACTIVE.set(i64::try_from(tx_map.len()).unwrap());
                 }
                 #[cfg(test)]
