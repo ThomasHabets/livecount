@@ -1,7 +1,8 @@
-use futures_util::{SinkExt, StreamExt};
-use log::{debug, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use futures_util::{SinkExt, StreamExt};
+use log::{debug, warn};
 use warp::http::header::HeaderMap;
 use warp::ws::{Message, WebSocket};
 use warp::Filter;

@@ -3,9 +3,11 @@
 * * Send new messages to all clients when number changes.
 *
 */
-use log::info;
 use std::sync::Arc;
+
+use anyhow::Result;
 use clap::Parser;
+use log::info;
 use warp::Filter;
 //use prometheus
 
@@ -21,14 +23,19 @@ struct Opt {
     #[arg(short, long)]
     quiet: bool,
     /// Verbose mode (-v, -vv, -vvv, etc)
-    #[arg(short, action=clap::ArgAction::Count)]
+    #[arg(short)]
     verbose: usize,
     /// Timestamp (sec, ms, ns, none)
     #[arg(short, long = "timestamp")]
     ts: Option<stderrlog::Timestamp>,
 
-    #[arg(long, default_value="127.0.0.1:8000")]
+    #[arg(long, default_value = "127.0.0.1:8000")]
     listen: std::net::SocketAddr,
+
+    #[arg(long)]
+    cert: std::path::PathBuf,
+    #[arg(long)]
+    key: std::path::PathBuf,
 }
 
 async fn metrics_handler() -> Result<impl warp::Reply, warp::Rejection> {
@@ -66,7 +73,7 @@ async fn metrics_handler() -> Result<impl warp::Reply, warp::Rejection> {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     println!("Running");
 
     let opt = Opt::parse();
@@ -84,6 +91,15 @@ async fn main() {
         .or(warp::path!("livecount" / "metrics").and_then(metrics_handler));
     let routes = api.with(warp::log("livecount"));
 
-    warp::serve(routes).run(opt.listen).await;
+    warp::serve(routes)
+        .tls()
+        .cert_path(opt.cert)
+        .key_path(opt.key)
+        .run(opt.listen)
+        .await;
+
+    // Plain HTTP serving.
+    // warp::serve(routes).run(opt.listen).await;
     // reg.to_owned().stop().await.expect("failed to stop()");
+    Ok(())
 }
