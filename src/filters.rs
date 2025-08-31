@@ -124,8 +124,8 @@ fn livecount_ws(
         )
 }
 
-fn livecount_index(
-) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+fn livecount_index() -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone
+{
     debug!("livecount_index()");
     warp::path!("livecount" / "health")
         .and(warp::get())

@@ -15,8 +15,11 @@ lazy_static! {
     pub static ref REGISTRY: PromReg = PromReg::new();
     pub static ref TOTAL_ACTIVE: IntGauge =
         IntGauge::new("total_active", "Total active sessions").expect("metric can't be created");
-    pub static ref PAGE_ACTIVE: IntGaugeVec =
-        IntGaugeVec::new(prometheus::Opts::new("page_active", "Active sessions per page"), &["page"]).expect("metric could not be created");
+    pub static ref PAGE_ACTIVE: IntGaugeVec = IntGaugeVec::new(
+        prometheus::Opts::new("page_active", "Active sessions per page"),
+        &["page"]
+    )
+    .expect("metric could not be created");
 }
 
 #[cfg(test)]
@@ -125,7 +128,10 @@ impl Registry {
                     };
 
                     tx_map.insert(id, ctx);
-                    debug!("After register: {} active connections (key {key})", tx_map.len());
+                    debug!(
+                        "After register: {} active connections (key {key})",
+                        tx_map.len()
+                    );
                     TOTAL_ACTIVE.set(i64::try_from(tx_map.len()).unwrap());
                     PAGE_ACTIVE.with_label_values(&[&key]).inc();
                     Self::publish(&tx_map, entry, u64::try_from(count).unwrap()).await;
