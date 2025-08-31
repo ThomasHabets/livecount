@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 async-std = "1.12.0"
+clap = { version = "4.5.46", features = ["derive"] }
 futures = "0.3.26"
 futures-timer = "3.0.2"
 futures-util = "0.3.26"
@@ -14,7 +15,6 @@ lazy_static = "1.4.0"
 log = "0.4.17"
 prometheus = "0.13.3"
 stderrlog = "0.5.4"
-structopt = "0.3.26"
 tokio = { version = "1.25.0", features = ["full"]}
 warp = "0.3"
 #tokio = { version = "1", features = ["full"] }

@@ -5,7 +5,7 @@
 */
 use log::info;
 use std::sync::Arc;
-use structopt::StructOpt;
+use clap::Parser;
 use warp::Filter;
 //use prometheus
 
@@ -14,18 +14,21 @@ mod registry;
 
 use registry::Registry;
 
-#[derive(StructOpt, Debug)]
-#[structopt()]
+#[derive(Parser, Debug)]
+#[command(version)]
 struct Opt {
     /// Silence all output
-    #[structopt(short = "q", long = "quiet")]
+    #[arg(short, long)]
     quiet: bool,
     /// Verbose mode (-v, -vv, -vvv, etc)
-    #[structopt(short = "v", long = "verbose", parse(from_occurrences))]
+    #[arg(short, action=clap::ArgAction::Count)]
     verbose: usize,
     /// Timestamp (sec, ms, ns, none)
-    #[structopt(short = "t", long = "timestamp")]
+    #[arg(short, long = "timestamp")]
     ts: Option<stderrlog::Timestamp>,
+
+    #[arg(long, default_value="127.0.0.1:8000")]
+    listen: std::net::SocketAddr,
 }
 
 async fn metrics_handler() -> Result<impl warp::Reply, warp::Rejection> {
@@ -66,7 +69,7 @@ async fn metrics_handler() -> Result<impl warp::Reply, warp::Rejection> {
 async fn main() {
     println!("Running");
 
-    let opt = Opt::from_args();
+    let opt = Opt::parse();
     stderrlog::new()
         .module(module_path!())
         .quiet(opt.quiet)
@@ -81,6 +84,6 @@ async fn main() {
         .or(warp::path!("livecount" / "metrics").and_then(metrics_handler));
     let routes = api.with(warp::log("livecount"));
 
-    warp::serve(routes).run(([127, 0, 0, 1], 8000)).await;
+    warp::serve(routes).run(opt.listen).await;
     // reg.to_owned().stop().await.expect("failed to stop()");
 }
