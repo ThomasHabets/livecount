@@ -18,7 +18,7 @@ log = "0.4"
 prometheus = "0.13"
 rustls = "0.23"
 rustls-pemfile = "2"
-stderrlog = "0.5"
+stderrlog = "0.6"
 tokio = { version = "1", features = ["full"]}
 tokio-rustls = "0.26"
 warp = { version = "0.3", features = ["tls"] }
