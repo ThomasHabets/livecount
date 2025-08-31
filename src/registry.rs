@@ -2,12 +2,14 @@ use futures::{pin_mut, select};
 use futures_timer::Delay;
 use futures_util::FutureExt;
 use lazy_static::lazy_static;
-use log::{debug, warn};
+use log::{debug, error, warn};
 use prometheus::{IntGauge, Registry as PromReg};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
 use tokio::time::Duration;
+
+const CHANNEL_SIZE: usize = 10_000;
 
 lazy_static! {
     pub static ref REGISTRY: PromReg = PromReg::new();
@@ -71,7 +73,7 @@ impl Registry {
         REGISTRY
             .register(Box::new(TOTAL_ACTIVE.clone()))
             .expect("can register");
-        let (tx, rx) = mpsc::channel(10);
+        let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
         Registry {
             ch: tx.clone(),
             _join: tokio::spawn(async move { Self::main(tx.clone(), rx).await }),
@@ -102,7 +104,7 @@ impl Registry {
             match rx.recv().await {
                 Some(Request::Register(key, ch)) => {
                     debug!("Registering");
-                    let (ctx, crx) = mpsc::channel(10);
+                    let (ctx, crx) = mpsc::channel(CHANNEL_SIZE);
 
                     let entry = key_map.entry(key.to_owned()).or_default();
                     let count = entry.len() + 1;
@@ -166,18 +168,19 @@ impl Registry {
     }
 
     pub async fn register(&self, key: &str) -> Option<Handle> {
-        let (tx, mut rx) = mpsc::channel(10);
+        let (tx, mut rx) = mpsc::channel(CHANNEL_SIZE);
         if let Err(err) = self.send(Request::Register(key.to_string(), tx)).await {
             warn!("Failed to register: {}", err);
             return None;
         }
         let rfut = rx.recv().fuse();
-        let tfut = Delay::new(Duration::from_millis(1000)).fuse();
+        let tfut = Delay::new(Duration::from_secs(60)).fuse();
         pin_mut!(rfut, tfut);
         select! {
             ret = rfut => ret,
             _ = tfut => {
-                panic!("Register timeout");
+                error!("Register timeout");
+                std::process::exit(1);
             }
         }
     }
