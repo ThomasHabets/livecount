@@ -4,9 +4,6 @@ no-default-features = false
 
 [advisories]
 ignore = [
-    # protobuf via prometheus.
-    "RUSTSEC-2024-0437",
-
     # async-std should be removed.
     "RUSTSEC-2025-0052",
 ]
