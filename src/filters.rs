@@ -13,6 +13,7 @@ use crate::registry::Registry;
 pub fn livecount(
     reg: Arc<Registry>,
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    debug!("livecount()");
     livecount_index()
         .or(livecount_ws(reg))
         .with(warp::cors().allow_any_origin())
@@ -26,6 +27,7 @@ async fn livecount_ws_map_upgrade(
     querymap: HashMap<String, String>,
     reg: Arc<Registry>,
 ) {
+    debug!("livecount_ws_map_upgrade()");
     let loc = match querymap.get("l") {
         Some(v) => v,
         None => "invalid",
@@ -83,6 +85,7 @@ fn livecount_ws_map(
     querymap: HashMap<String, String>,
     inreg: Arc<Registry>,
 ) -> impl Reply {
+    debug!("livecount_ws_map()");
     let reg = inreg.clone();
     // TODO: smarter x-forwarded-for parsing.
     let remote = match remote {
@@ -94,9 +97,10 @@ fn livecount_ws_map(
     })
 }
 
-pub fn livecount_ws(
+fn livecount_ws(
     inreg: Arc<Registry>,
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    debug!("livecount_ws()");
     warp::path!("livecount" / "ws")
         .and(warp::ws())
         .and(warp::addr::remote())
@@ -116,8 +120,9 @@ pub fn livecount_ws(
         )
 }
 
-pub fn livecount_index(
+fn livecount_index(
 ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    debug!("livecount_index()");
     warp::path!("livecount" / "health")
         .and(warp::get())
         .map(|| {
