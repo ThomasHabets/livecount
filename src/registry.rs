@@ -24,11 +24,14 @@ lazy_static! {
         &["page"]
     ).expect("failed to create page_active metric");
 
-    pub static ref TIMEOUTS: IntCounter = IntCounter::new("timeouts", "Websocket timeout counter").expect("failed to create timeouts metric");
+    pub static ref TIMEOUTS: IntCounterVec = IntCounterVec::new(
+        prometheus::Opts::new("timeouts", "Websocket timeout counter"),
+        &["type"])
+        .expect("failed to create timeouts metric");
 
     pub static ref UPDATES_SENT: IntCounterVec = IntCounterVec::new(
         prometheus::Opts::new("updates_sent", "Total updates sent across all websockets to all clients."),
-        &["status"])
+        &["type", "status"])
         .expect("failed to create metric");
 
     pub static ref REGISTRATIONS: IntCounter = IntCounter::new("registrations", "Total websocket registrations.")
@@ -99,7 +102,12 @@ impl Registry {
         REGISTRY
             .register(Box::new(PAGE_ACTIVE.clone()))
             .expect("failed to register page_active");
-        for metric in [REGISTRATIONS.clone(), TIMEOUTS.clone()].into_iter() {
+        for metric in [REGISTRATIONS.clone()].into_iter() {
+            REGISTRY
+                .register(Box::new(metric))
+                .expect("failed to register metric");
+        }
+        for metric in [TIMEOUTS.clone()].into_iter() {
             REGISTRY
                 .register(Box::new(metric))
                 .expect("failed to register metric");

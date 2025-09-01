@@ -14,6 +14,7 @@ use crate::registry::Registry;
 use crate::registry::{UPDATES_SENT, WS_RX_TYPE};
 
 const MAX_WS_LIFE: Duration = Duration::from_secs(600);
+const MAX_WS_LIFE_PING: Duration = Duration::from_secs(200);
 const MAX_WS_SEND_TIME: Duration = Duration::from_secs(5);
 
 pub fn livecount(
@@ -65,9 +66,13 @@ async fn livecount_ws_map_upgrade(
     {
         let deadline = tokio::time::Instant::now() + MAX_WS_LIFE;
         let timeout = tokio::time::sleep_until(deadline);
+        let deadline = tokio::time::Instant::now() + MAX_WS_LIFE_PING;
+        let timeout_ping = tokio::time::sleep_until(deadline);
         tokio::pin!(timeout);
+        tokio::pin!(timeout_ping);
         loop {
             let mut new_sleep = None;
+            let mut new_sleep_ping = None;
             tokio::select! {
                 msg = handle.next() => {
                     // TODO: batch updates.
@@ -75,11 +80,11 @@ async fn livecount_ws_map_upgrade(
                         match websocket_send(&mut tx, Message::text(format!("{msg}"))).await {
                             Err(e) => {
                                 warn!("Error sending on websocket: {e}");
-                                UPDATES_SENT.with_label_values(&[e]).inc();
+                                UPDATES_SENT.with_label_values(&["data", &e]).inc();
                                 break;
                             },
                             Ok(_) => {
-                                UPDATES_SENT.with_label_values(&["ok"]).inc();
+                                UPDATES_SENT.with_label_values(&["data", "ok"]).inc();
                             },
                         }
                     }
@@ -93,6 +98,7 @@ async fn livecount_ws_map_upgrade(
                         },
                         Some(Ok(ref m)) => {
                             debug!("Got a message: {m:?}");
+                            new_sleep_ping = Some(MAX_WS_LIFE_PING);
                             if m.is_close(){
                                 debug!("WS Disconnection: {:?}", wsmsg);
                                 WS_RX_TYPE.with_label_values(&["away"]).inc();
@@ -121,12 +127,30 @@ async fn livecount_ws_map_upgrade(
                 },
                 _ = &mut timeout => {
                     debug!("Max websocket time exceeded");
-                    crate::registry::TIMEOUTS.inc();
+                    crate::registry::TIMEOUTS.with_label_values(&["final"]).inc();
                     break;
+                }
+                _ = &mut timeout_ping => {
+                    debug!("Max websocket ping time exceeded");
+                    crate::registry::TIMEOUTS.with_label_values(&["ping"]).inc();
+                    match websocket_send(&mut tx, Message::ping("livecount".as_bytes())).await {
+                        Err(e) => {
+                            warn!("Error sending ping on websocket: {e}");
+                            UPDATES_SENT.with_label_values(&["ping", &e]).inc();
+                            break;
+                        },
+                        Ok(_) => {
+                            UPDATES_SENT.with_label_values(&["ping", "ok"]).inc();
+                        },
+                    }
+                    new_sleep_ping = Some(MAX_WS_LIFE_PING);
                 }
             };
             if let Some(t) = new_sleep {
                 timeout.as_mut().reset(tokio::time::Instant::now() + t);
+            }
+            if let Some(t) = new_sleep_ping {
+                timeout_ping.as_mut().reset(tokio::time::Instant::now() + t);
             }
         }
     }
