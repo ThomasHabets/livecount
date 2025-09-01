@@ -118,7 +118,9 @@ impl Registry {
 
     async fn publish(txm: &HashMap<u64, mpsc::Sender<u64>>, set: &HashSet<u64>, v: u64) {
         for id in set {
-            trace!("Sending to id {}", id);
+            if false {
+                trace!("Sending to id {}", id);
+            }
             let e = txm.get(id);
             if e.is_none() {
                 warn!("Wanted to publish to channel ID {}, but missing", id);
@@ -196,6 +198,7 @@ impl Registry {
                         }
                     }
                     debug!("After unregister: {} active connections", tx_map.len());
+                    // TODO: if 0, remove from map.
                     PAGE_ACTIVE.with_label_values(&[&key]).dec();
                     TOTAL_ACTIVE.set(i64::try_from(tx_map.len()).unwrap());
                 }

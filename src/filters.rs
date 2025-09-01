@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, warn};
 use tokio::time::Duration;
 use warp::http::header::HeaderMap;
 use warp::ws::{Message, WebSocket};
@@ -25,6 +25,10 @@ pub fn livecount(
         .with(warp::cors().allow_any_origin())
 }
 
+/// Send a message on a websocket, with a timeout.
+///
+/// On error, return a one-word string suitable for putting in the prometheus
+/// metric.
 async fn websocket_send(
     tx: &mut SplitSink<WebSocket, Message>,
     msg: Message,
@@ -37,10 +41,7 @@ async fn websocket_send(
         },
         r = tx.send(msg) => {
             match r {
-                Ok(_) => {
-                    trace!("Sent websocket message");
-                    Ok(())
-                },
+                Ok(_) => Ok(()),
                 Err(e) => {
                     info!("Failed to send websocket message: {e}");
                     Err(e.to_string())
@@ -95,6 +96,7 @@ async fn livecount_ws_map_upgrade(
             let mut new_sleep = None;
             tokio::select! {
                 msg = handle.next() => {
+                    // TODO: batch updates.
                     if let Some(msg) = msg {
                         match websocket_send(&mut tx, Message::text(format!("{msg}"))).await {
                             Err(e) => {
