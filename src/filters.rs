@@ -54,8 +54,7 @@ async fn websocket_send(
 async fn livecount_ws_map_upgrade(
     websocket: WebSocket,
     remote: String,
-    origin: String,
-    orig: Option<String>,
+    origin: Option<String>,
     querymap: HashMap<String, String>,
     reg: Arc<Registry>,
 ) {
@@ -68,14 +67,9 @@ async fn livecount_ws_map_upgrade(
         Some(pos) => &loc[..pos],
         None => loc,
     };
-    debug!(
-        "WS upgrade from {} {} by {}",
-        origin,
-        loc,
-        orig.unwrap_or(remote)
-    );
-    if !loc.starts_with(&format!("{}/", origin)) {
-        warn!("ERROR: wrong origin {}, want {}", loc, origin);
+    debug!("WS upgrade from {origin:?} {loc} by {remote}");
+    if !loc.starts_with(&format!("{}/", origin.clone().unwrap_or_default())) {
+        warn!("ERROR: wrong origin {loc}, want {origin:?}");
     }
     let (mut tx, mut rx) = websocket.split();
 
@@ -163,8 +157,7 @@ async fn livecount_ws_map_upgrade(
 fn livecount_ws_map(
     ws: warp::ws::Ws,
     remote: Option<std::net::SocketAddr>,
-    origin: String,
-    orig: Option<String>,
+    origin: Option<String>,
     _heads: HeaderMap,
     querymap: HashMap<String, String>,
     inreg: Arc<Registry>,
@@ -177,7 +170,7 @@ fn livecount_ws_map(
         None => "unknown".to_string(),
     };
     ws.on_upgrade(move |websocket| async move {
-        livecount_ws_map_upgrade(websocket, remote, origin, orig, querymap, reg).await;
+        livecount_ws_map_upgrade(websocket, remote, origin, querymap, reg).await;
     })
 }
 
@@ -188,18 +181,16 @@ fn livecount_ws(
     warp::path!("livecount" / "ws")
         .and(warp::ws())
         .and(warp::addr::remote())
-        .and(warp::header::<String>("origin"))
-        .and(warp::header::optional::<String>("x-forwarded-for"))
+        .and(warp::header::optional::<String>("origin"))
         .and(warp::filters::header::headers_cloned())
         .and(warp::query::<HashMap<String, String>>())
         .map(
             move |ws: warp::ws::Ws,
                   remote: Option<std::net::SocketAddr>,
-                  origin,
-                  orig: Option<String>,
+                  origin: Option<String>,
                   heads,
                   querymap: HashMap<String, String>| {
-                livecount_ws_map(ws, remote, origin, orig, heads, querymap, inreg.clone())
+                livecount_ws_map(ws, remote, origin, heads, querymap, inreg.clone())
             },
         )
 }

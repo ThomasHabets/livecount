@@ -29,7 +29,7 @@ struct Opt {
     #[arg(short, long = "timestamp")]
     ts: Option<stderrlog::Timestamp>,
 
-    #[arg(long, default_value = "127.0.0.1:8000")]
+    #[arg(long, default_value = "[::1]:8000")]
     listen: std::net::SocketAddr,
 
     #[arg(long)]
