@@ -18,3 +18,9 @@ Test page. Not really a health page.
 ### /livecount/metrics
 
 Prometheus metrics.
+
+## TODO
+
+* Either upgrade to warp 0.4, or throw it out and only use hyper.
+* Clean up all the logic. This was literally my first Rust program, so it's a
+  bit shit.
