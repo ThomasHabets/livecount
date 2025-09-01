@@ -4,8 +4,6 @@ no-default-features = false
 
 [advisories]
 ignore = [
-    # async-std should be removed.
-    "RUSTSEC-2025-0052",
 ]
 
 [licenses]
