@@ -1,10 +1,11 @@
+use std::collections::{HashMap, HashSet};
+
 use futures::{pin_mut, select};
 use futures_timer::Delay;
 use futures_util::FutureExt;
 use lazy_static::lazy_static;
-use log::{debug, error, warn};
-use prometheus::{IntGauge, IntGaugeVec, Registry as PromReg};
-use std::collections::{HashMap, HashSet};
+use log::{debug, error, trace, warn};
+use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry as PromReg};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
 use tokio::time::Duration;
@@ -13,13 +14,30 @@ const CHANNEL_SIZE: usize = 10_000;
 
 lazy_static! {
     pub static ref REGISTRY: PromReg = PromReg::new();
+
+    // When adding a new metric, one must also add it to the impl Registry fn
+    // new, below.
     pub static ref TOTAL_ACTIVE: IntGauge =
         IntGauge::new("total_active", "Total active sessions").expect("metric can't be created");
     pub static ref PAGE_ACTIVE: IntGaugeVec = IntGaugeVec::new(
         prometheus::Opts::new("page_active", "Active sessions per page"),
         &["page"]
-    )
-    .expect("metric could not be created");
+    ).expect("failed to create page_active metric");
+
+    pub static ref TIMEOUTS: IntCounter = IntCounter::new("timeouts", "Websocket timeout counter").expect("failed to create timeouts metric");
+
+    pub static ref UPDATES_SENT: IntCounterVec = IntCounterVec::new(
+        prometheus::Opts::new("updates_sent", "Total updates sent across all websockets to all clients."),
+        &["status"])
+        .expect("failed to create metric");
+
+    pub static ref REGISTRATIONS: IntCounter = IntCounter::new("registrations", "Total websocket registrations.")
+        .expect("failed to create metric");
+
+    pub static ref WS_RX_TYPE: IntCounterVec = IntCounterVec::new(
+        prometheus::Opts::new("websocket_rx", "Received websocket messages, by type."),
+        &["type"])
+        .expect("failed to create metric");
 }
 
 #[cfg(test)]
@@ -80,7 +98,17 @@ impl Registry {
             .expect("failed to register");
         REGISTRY
             .register(Box::new(PAGE_ACTIVE.clone()))
-            .expect("failed to register");
+            .expect("failed to register page_active");
+        for metric in [REGISTRATIONS.clone(), TIMEOUTS.clone()].into_iter() {
+            REGISTRY
+                .register(Box::new(metric))
+                .expect("failed to register metric");
+        }
+        for metric in [WS_RX_TYPE.clone(), UPDATES_SENT.clone()].into_iter() {
+            REGISTRY
+                .register(Box::new(metric))
+                .expect("failed to register metric");
+        }
         let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
         Registry {
             ch: tx.clone(),
@@ -90,7 +118,7 @@ impl Registry {
 
     async fn publish(txm: &HashMap<u64, mpsc::Sender<u64>>, set: &HashSet<u64>, v: u64) {
         for id in set {
-            debug!("Sending to id {}", id);
+            trace!("Sending to id {}", id);
             let e = txm.get(id);
             if e.is_none() {
                 warn!("Wanted to publish to channel ID {}, but missing", id);
@@ -112,6 +140,7 @@ impl Registry {
             match rx.recv().await {
                 Some(Request::Register(key, ch)) => {
                     debug!("Registering");
+                    REGISTRATIONS.inc();
                     let (ctx, crx) = mpsc::channel(CHANNEL_SIZE);
 
                     let entry = key_map.entry(key.to_owned()).or_default();

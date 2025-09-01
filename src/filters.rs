@@ -1,14 +1,20 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
-use log::{debug, warn};
+use log::{debug, error, info, trace, warn};
+use tokio::time::Duration;
 use warp::http::header::HeaderMap;
 use warp::ws::{Message, WebSocket};
 use warp::Filter;
 use warp::Reply;
 
 use crate::registry::Registry;
+use crate::registry::{UPDATES_SENT, WS_RX_TYPE};
+
+const MAX_WS_LIFE: Duration = Duration::from_secs(600);
+const MAX_WS_SEND_TIME: Duration = Duration::from_secs(5);
 
 pub fn livecount(
     reg: Arc<Registry>,
@@ -17,6 +23,31 @@ pub fn livecount(
     livecount_index()
         .or(livecount_ws(reg))
         .with(warp::cors().allow_any_origin())
+}
+
+async fn websocket_send(
+    tx: &mut SplitSink<WebSocket, Message>,
+    msg: Message,
+) -> std::result::Result<(), String> {
+    let timeout = tokio::time::sleep(MAX_WS_SEND_TIME);
+    tokio::pin!(timeout);
+    tokio::select! {
+        _ = timeout => {
+            Err("timeout".to_string())
+        },
+        r = tx.send(msg) => {
+            match r {
+                Ok(_) => {
+                    trace!("Sent websocket message");
+                    Ok(())
+                },
+                Err(e) => {
+                    info!("Failed to send websocket message: {e}");
+                    Err(e.to_string())
+                }
+            }
+        }
+    }
 }
 
 async fn livecount_ws_map_upgrade(
@@ -49,6 +80,9 @@ async fn livecount_ws_map_upgrade(
 
     let mut handle = reg.register(loc).await.unwrap();
     {
+        let deadline = tokio::time::Instant::now() + MAX_WS_LIFE;
+        let timeout = tokio::time::sleep_until(deadline);
+        tokio::pin!(timeout);
         //let wsfut = rx.next().fuse();
         loop {
             //let hnfut = handle.next().fuse();
@@ -58,22 +92,66 @@ async fn livecount_ws_map_upgrade(
             // discards the previous wait. Maybe it'll be
             // fine, since aside from closing the
             // websocket we don't expect anything from it.
+            let mut new_sleep = None;
             tokio::select! {
                 msg = handle.next() => {
                     if let Some(msg) = msg {
-                        let send = async_std::future::timeout(std::time::Duration::from_secs(5), tx.send(Message::text(format!("{}", msg))));
-                        if let Err(err) = send.await {
-                            warn!("connection broken?: {:?}", err);
-                            break
+                        match websocket_send(&mut tx, Message::text(format!("{msg}"))).await {
+                            Err(e) => {
+                                warn!("Error sending on websocket: {e}");
+                                UPDATES_SENT.with_label_values(&[e]).inc();
+                                break;
+                            },
+                            Ok(_) => {
+                                UPDATES_SENT.with_label_values(&["ok"]).inc();
+                            },
                         }
                     }
                 },
                 wsmsg = rx.next() => {
-                    debug!("Closing because got something from socket: {:?}", wsmsg);
-                    // Ok(Close(Some(CloseFrame { code: Away, reason: "" })))
-                    break
+                    match wsmsg {
+                        None => {
+                            debug!("Got None message, disconnecting");
+                            WS_RX_TYPE.with_label_values(&["none"]).inc();
+                            break;
+                        },
+                        Some(Ok(ref m)) => {
+                            debug!("Got a message: {m:?}");
+                            if m.is_close(){
+                                debug!("WS Disconnection: {:?}", wsmsg);
+                                WS_RX_TYPE.with_label_values(&["away"]).inc();
+                                break;
+                            } else if m.is_ping() {
+                                WS_RX_TYPE.with_label_values(&["ping"]).inc();
+                                new_sleep = Some(MAX_WS_LIFE);
+                            } else if m.is_text() {
+                                WS_RX_TYPE.with_label_values(&["text"]).inc();
+                            } else if m.is_binary() {
+                                WS_RX_TYPE.with_label_values(&["binary"]).inc();
+                            } else if m.is_pong() {
+                                WS_RX_TYPE.with_label_values(&["pong"]).inc();
+                                new_sleep = Some(MAX_WS_LIFE);
+                            } else {
+                                WS_RX_TYPE.with_label_values(&["unknown"]).inc();
+                                error!("Unknown message type: {wsmsg:?}");
+                            }
+                        },
+                        Some(Err(e)) => {
+                            WS_RX_TYPE.with_label_values(&["error"]).inc();
+                            error!("Error receiving message? {e}");
+                            break;
+                        },
+                    };
                 },
+                _ = &mut timeout => {
+                    debug!("Max websocket time exceeded");
+                    crate::registry::TIMEOUTS.inc();
+                    break;
+                }
             };
+            if let Some(t) = new_sleep {
+                timeout.as_mut().reset(tokio::time::Instant::now() + t);
+            }
         }
     }
     debug!("WS Terminating");
