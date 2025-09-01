@@ -54,39 +54,19 @@ async fn websocket_send(
 async fn livecount_ws_map_upgrade(
     websocket: WebSocket,
     remote: String,
-    origin: Option<String>,
-    querymap: HashMap<String, String>,
+    url: &url::Url,
     reg: Arc<Registry>,
 ) {
     debug!("livecount_ws_map_upgrade()");
-    let loc = match querymap.get("l") {
-        Some(v) => v,
-        None => "invalid",
-    };
-    let loc = match loc.find('?') {
-        Some(pos) => &loc[..pos],
-        None => loc,
-    };
-    debug!("WS upgrade from {origin:?} {loc} by {remote}");
-    if !loc.starts_with(&format!("{}/", origin.clone().unwrap_or_default())) {
-        warn!("ERROR: wrong origin {loc}, want {origin:?}");
-    }
+    debug!("WS upgrade on {url} by {remote}");
     let (mut tx, mut rx) = websocket.split();
 
-    let mut handle = reg.register(loc).await.unwrap();
+    let mut handle = reg.register(url.as_str()).await.unwrap();
     {
         let deadline = tokio::time::Instant::now() + MAX_WS_LIFE;
         let timeout = tokio::time::sleep_until(deadline);
         tokio::pin!(timeout);
-        //let wsfut = rx.next().fuse();
         loop {
-            //let hnfut = handle.next().fuse();
-
-            //pin_mut!(wsfut, hnfut);
-            // TODO: I don't think this is right. This
-            // discards the previous wait. Maybe it'll be
-            // fine, since aside from closing the
-            // websocket we don't expect anything from it.
             let mut new_sleep = None;
             tokio::select! {
                 msg = handle.next() => {
@@ -169,8 +149,19 @@ fn livecount_ws_map(
         Some(ra) => format!("{:?}", ra),
         None => "unknown".to_string(),
     };
+    let Some(Ok(mut url)) = querymap.get("l").map(|s| url::Url::parse(s)) else {
+        panic!();
+    };
+    url.set_query(None);
+
+    {
+        let want = format!("{}/", origin.clone().unwrap_or_default());
+        if !url.as_str().starts_with(&want) {
+            warn!("ERROR: wrong origin {url}, want starts with {origin:?}");
+        }
+    }
     ws.on_upgrade(move |websocket| async move {
-        livecount_ws_map_upgrade(websocket, remote, origin, querymap, reg).await;
+        livecount_ws_map_upgrade(websocket, remote, &url, reg).await;
     })
 }
 

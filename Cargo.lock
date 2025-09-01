@@ -1014,6 +1014,7 @@ dependencies = [
  "stderrlog",
  "tokio",
  "tokio-rustls 0.26.2",
+ "url",
  "warp",
 ]
 
