@@ -13,8 +13,21 @@ use warp::Reply;
 use crate::registry::Registry;
 use crate::registry::{UPDATES_SENT, WS_RX_TYPE};
 
-const MAX_WS_LIFE: Duration = Duration::from_secs(600);
-const MAX_WS_LIFE_PING: Duration = Duration::from_secs(200);
+mod static_assert {
+    /// This asserts that ping life is at least 30 seconds before end of
+    /// websocket life.
+    const _MUST_WORK: u64 = super::MAX_WS_LIFE_PING_SECS - 30;
+}
+
+/// Max lifetime of an idle websocket.
+const MAX_WS_LIFE_SECS: u64 = 600; // 10 minutes.
+const MAX_WS_LIFE: Duration = Duration::from_secs(MAX_WS_LIFE_SECS);
+
+/// Websocket lifetime after which a ping is sent.
+const MAX_WS_LIFE_PING_SECS: u64 = MAX_WS_LIFE_SECS - 60;
+const MAX_WS_LIFE_PING: Duration = Duration::from_secs(MAX_WS_LIFE_PING_SECS);
+
+/// Timeout for sending websocket message.
 const MAX_WS_SEND_TIME: Duration = Duration::from_secs(5);
 
 pub fn livecount(
