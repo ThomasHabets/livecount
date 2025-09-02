@@ -108,8 +108,10 @@ async fn livecount_ws_map_upgrade(
                                 new_sleep = Some(MAX_WS_LIFE);
                             } else if m.is_text() {
                                 WS_RX_TYPE.with_label_values(&["text"]).inc();
+                                new_sleep = Some(MAX_WS_LIFE);
                             } else if m.is_binary() {
                                 WS_RX_TYPE.with_label_values(&["binary"]).inc();
+                                new_sleep = Some(MAX_WS_LIFE);
                             } else if m.is_pong() {
                                 WS_RX_TYPE.with_label_values(&["pong"]).inc();
                                 new_sleep = Some(MAX_WS_LIFE);
