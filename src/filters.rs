@@ -134,7 +134,7 @@ async fn livecount_ws_map_upgrade(
                             }
                         },
                         Some(Err(e)) => {
-                            WS_RX_TYPE.with_label_values(&["error"]).inc();
+                            WS_RX_TYPE.with_label_values(&[format!("{e}")]).inc();
                             error!("Error receiving message? {e}");
                             break;
                         },
