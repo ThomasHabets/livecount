@@ -205,7 +205,7 @@ async fn livecount_ws_map_upgrade(
             }
 
             // Send a ping.
-            debug!("Max websocket ping time exceeded");
+            debug!("Max websocket ping time exceeded. Sending ping.");
             TIMEOUTS.with_label_values(&["ping"]).inc();
             match to_client_tx
                 .send(Message::ping("livecount".as_bytes()))
