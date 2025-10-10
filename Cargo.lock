@@ -1006,7 +1006,6 @@ dependencies = [
  "futures-timer",
  "futures-util",
  "hyper 1.7.0",
- "lazy_static",
  "log",
  "prometheus",
  "rustls 0.23.31",

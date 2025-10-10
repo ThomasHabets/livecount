@@ -13,7 +13,6 @@ futures = "0.3"
 futures-timer = "3"
 futures-util = "0.3"
 hyper = { version = "1", features = ["http1", "http2"] }
-lazy_static = "1.4"
 log = "0.4"
 prometheus = "0.14"
 rustls = "0.23"

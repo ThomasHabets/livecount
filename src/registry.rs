@@ -4,7 +4,6 @@ use std::sync::LazyLock;
 use futures::{pin_mut, select};
 use futures_timer::Delay;
 use futures_util::FutureExt;
-use lazy_static::lazy_static;
 use log::{debug, error, trace, warn};
 use prometheus::{
     Histogram, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry as PromReg,
@@ -24,36 +23,52 @@ pub static PING_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
     .unwrap()
 });
 
-lazy_static! {
-    pub static ref REGISTRY: PromReg = PromReg::new();
+pub static REGISTRY: LazyLock<PromReg> = LazyLock::new(PromReg::new);
 
-    // When adding a new metric, one must also add it to the impl Registry fn
-    // new, below.
-    pub static ref TOTAL_ACTIVE: IntGauge =
-        IntGauge::new("total_active", "Total active sessions").expect("metric can't be created");
-    pub static ref PAGE_ACTIVE: IntGaugeVec = IntGaugeVec::new(
+// When adding a new metric, one must also add it to the impl Registry fn
+// new, below.
+pub static TOTAL_ACTIVE: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new("total_active", "Total active sessions").expect("metric can't be created")
+});
+pub static PAGE_ACTIVE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
         prometheus::Opts::new("page_active", "Active sessions per page"),
-        &["page"]
-    ).expect("failed to create page_active metric");
+        &["page"],
+    )
+    .expect("failed to create page_active metric")
+});
 
-    pub static ref TIMEOUTS: IntCounterVec = IntCounterVec::new(
+pub static TIMEOUTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    IntCounterVec::new(
         prometheus::Opts::new("timeouts", "Websocket timeout counter"),
-        &["type"])
-        .expect("failed to create timeouts metric");
+        &["type"],
+    )
+    .expect("failed to create timeouts metric")
+});
 
-    pub static ref UPDATES_SENT: IntCounterVec = IntCounterVec::new(
-        prometheus::Opts::new("updates_sent", "Total updates sent across all websockets to all clients."),
-        &["type", "status"])
-        .expect("failed to create metric");
+pub static UPDATES_SENT: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    IntCounterVec::new(
+        prometheus::Opts::new(
+            "updates_sent",
+            "Total updates sent across all websockets to all clients.",
+        ),
+        &["type", "status"],
+    )
+    .expect("failed to create metric")
+});
 
-    pub static ref REGISTRATIONS: IntCounter = IntCounter::new("registrations", "Total websocket registrations.")
-        .expect("failed to create metric");
+pub static REGISTRATIONS: LazyLock<IntCounter> = LazyLock::new(|| {
+    IntCounter::new("registrations", "Total websocket registrations.")
+        .expect("failed to create metric")
+});
 
-    pub static ref WS_RX_TYPE: IntCounterVec = IntCounterVec::new(
+pub static WS_RX_TYPE: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    IntCounterVec::new(
         prometheus::Opts::new("websocket_rx", "Received websocket messages, by type."),
-        &["type"])
-        .expect("failed to create metric");
-}
+        &["type"],
+    )
+    .expect("failed to create metric")
+});
 
 #[cfg(test)]
 mod tests {
