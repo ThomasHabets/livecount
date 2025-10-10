@@ -1,16 +1,28 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 use futures::{pin_mut, select};
 use futures_timer::Delay;
 use futures_util::FutureExt;
 use lazy_static::lazy_static;
 use log::{debug, error, trace, warn};
-use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry as PromReg};
+use prometheus::{
+    Histogram, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry as PromReg,
+};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::SendError;
 use tokio::time::Duration;
 
 const CHANNEL_SIZE: usize = 10_000;
+
+pub static PING_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
+    use prometheus::HistogramOpts;
+    Histogram::with_opts(
+        HistogramOpts::new("ping_latency_ms", "Ping latency")
+            .buckets(prometheus::exponential_buckets(1.0, 2.0f64.sqrt(), 20).unwrap()),
+    )
+    .unwrap()
+});
 
 lazy_static! {
     pub static ref REGISTRY: PromReg = PromReg::new();
@@ -113,6 +125,11 @@ impl Registry {
                 .expect("failed to register metric");
         }
         for metric in [WS_RX_TYPE.clone(), UPDATES_SENT.clone()].into_iter() {
+            REGISTRY
+                .register(Box::new(metric))
+                .expect("failed to register metric");
+        }
+        for metric in [PING_LATENCY.clone()].into_iter() {
             REGISTRY
                 .register(Box::new(metric))
                 .expect("failed to register metric");

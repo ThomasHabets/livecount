@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
 use tokio::time::Duration;
 use warp::http::header::HeaderMap;
 use warp::ws::{Message, WebSocket};
@@ -11,13 +12,17 @@ use warp::Filter;
 use warp::Reply;
 
 use crate::registry::Registry;
-use crate::registry::{TIMEOUTS, UPDATES_SENT, WS_RX_TYPE};
+use crate::registry::{PING_LATENCY, TIMEOUTS, UPDATES_SENT, WS_RX_TYPE};
+
+static THE_PAST: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
 
 mod static_assert {
-    /// This asserts that ping life is at least 30 seconds before end of
+    /// This asserts that ping life is at least `MIN_PING_SECS` seconds before end of
     /// websocket life.
-    const _MUST_WORK: u64 = super::MAX_WS_LIFE_PING_SECS - 30;
+    const _MUST_WORK: u64 = super::MAX_WS_LIFE_PING_SECS - super::_MIN_PING_SECS;
 }
+
+const _MIN_PING_SECS: u64 = 10;
 
 /// Max lifetime of an idle websocket.
 const MAX_WS_LIFE_SECS: u64 = 600; // 10 minutes.
@@ -131,6 +136,7 @@ async fn livecount_ws_map_upgrade(
     let from_client = async {
         loop {
             let wsmsg = rx.next().await;
+            let now = (std::time::Instant::now() - *THE_PAST).as_nanos();
             match wsmsg {
                 None => {
                     debug!("Got None message, disconnecting");
@@ -155,6 +161,26 @@ async fn livecount_ws_map_upgrade(
                         new_sleep_renew().await;
                     } else if m.is_pong() {
                         WS_RX_TYPE.with_label_values(&["pong"]).inc();
+                        let txt = String::from_utf8_lossy(m.as_bytes());
+                        let stxt: Vec<_> = txt.split(' ').collect();
+                        if stxt.len() != 2 || stxt[0] != "livecount" {
+                            error!("Got pong with bad data: {txt}");
+                        } else {
+                            match stxt[1].parse::<u128>() {
+                                Ok(nanos) if now >= nanos => {
+                                    let rtt = std::time::Duration::from_nanos(
+                                        (now - nanos).try_into().unwrap_or(0),
+                                    );
+                                    let rtt_ms = rtt.as_nanos() as f64 / 1_000_000f64;
+                                    PING_LATENCY.observe(rtt_ms);
+                                    trace!("Ping RTT {rtt:?}");
+                                }
+                                Ok(nanos) => {
+                                    error!("Ping time underflow: {now} < {nanos}");
+                                }
+                                Err(_e) => error!("Got pong with bad data: {txt}"),
+                            }
+                        }
                         new_sleep_renew().await;
                     } else {
                         WS_RX_TYPE.with_label_values(&["unknown"]).inc();
@@ -207,8 +233,9 @@ async fn livecount_ws_map_upgrade(
             // Send a ping.
             debug!("Max websocket ping time exceeded. Sending ping.");
             TIMEOUTS.with_label_values(&["ping"]).inc();
+            let nanos = (std::time::Instant::now() - *THE_PAST).as_nanos();
             match to_client_tx
-                .send(Message::ping("livecount".as_bytes()))
+                .send(Message::ping(format!("livecount {nanos}").as_bytes()))
                 .await
             {
                 Err(e) => {
