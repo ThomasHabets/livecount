@@ -122,6 +122,7 @@ pub struct Registry {
 }
 
 impl Registry {
+    #[allow(clippy::single_element_loop)]
     pub fn new() -> Registry {
         REGISTRY
             .register(Box::new(TOTAL_ACTIVE.clone()))
