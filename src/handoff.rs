@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 use futures_util::stream;
 use log::warn;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::{TcpStream, UnixListener, UnixStream};
+use tokio::net::{TcpStream, UnixDatagram};
 
 const MAX_INITIAL_DATA: usize = 1024 * 1024;
 const CMSG_SPACE_FD: usize =
@@ -75,33 +75,32 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for PrefixedIo<T> {
     }
 }
 
-pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixListener> {
-    UnixListener::bind(path)
+pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixDatagram> {
+    UnixDatagram::bind(path)
 }
 
 pub fn incoming(
-    listener: UnixListener,
+    socket: UnixDatagram,
 ) -> impl futures_util::Stream<Item = io::Result<PrefixedTcpStream>> + Send {
-    stream::unfold(listener, |listener| async move {
-        let item = accept_handoff(&listener).await;
-        Some((item, listener))
+    stream::unfold(socket, |socket| async move {
+        let item = next_handoff(&socket).await;
+        Some((item, socket))
     })
 }
 
-async fn accept_handoff(listener: &UnixListener) -> io::Result<PrefixedTcpStream> {
+async fn next_handoff(socket: &UnixDatagram) -> io::Result<PrefixedTcpStream> {
     loop {
-        let (control, _addr) = listener.accept().await?;
-        match receive_handoff(control).await {
+        match receive_handoff(socket).await {
             Ok(stream) => return Ok(stream),
             Err(err) => warn!("failed to receive socket handoff: {err}"),
         }
     }
 }
 
-async fn receive_handoff(control: UnixStream) -> io::Result<PrefixedTcpStream> {
+async fn receive_handoff(socket: &UnixDatagram) -> io::Result<PrefixedTcpStream> {
     loop {
-        control.readable().await?;
-        match recv_handoff(control.as_raw_fd()) {
+        socket.readable().await?;
+        match recv_handoff(socket.as_raw_fd()) {
             Ok((initial_data, fd)) => {
                 let stream = tcp_stream_from_fd(fd)?;
                 return Ok(PrefixedIo::new(stream, initial_data));
@@ -141,16 +140,16 @@ fn recv_handoff(control_fd: RawFd) -> io::Result<(Vec<u8>, RawFd)> {
     if nread < 0 {
         return Err(io::Error::last_os_error());
     }
-    if nread == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "handoff connection closed before passing a file descriptor",
-        ));
-    }
     if msg.msg_flags & libc::MSG_CTRUNC != 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "handoff control message was truncated",
+        ));
+    }
+    if msg.msg_flags & libc::MSG_TRUNC != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "handoff initial data was truncated",
         ));
     }
 
@@ -223,7 +222,7 @@ mod tests {
     use std::io::Write;
     use std::net::{TcpListener, TcpStream as StdTcpStream};
     use std::os::unix::io::AsRawFd;
-    use std::os::unix::net::UnixStream as StdUnixStream;
+    use std::os::unix::net::UnixDatagram as StdUnixDatagram;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -244,9 +243,9 @@ mod tests {
 
     #[tokio::test]
     async fn receives_fd_and_initial_data() {
-        let (control_tx, control_rx) = StdUnixStream::pair().unwrap();
+        let (control_tx, control_rx) = StdUnixDatagram::pair().unwrap();
         control_rx.set_nonblocking(true).unwrap();
-        let control_rx = tokio::net::UnixStream::from_std(control_rx).unwrap();
+        let control_rx = tokio::net::UnixDatagram::from_std(control_rx).unwrap();
 
         let (mut client, server) = tcp_pair();
         send_fd_with_data(control_tx.as_raw_fd(), server.as_raw_fd(), b"hello ").unwrap();
@@ -255,7 +254,7 @@ mod tests {
         client.write_all(b"world").unwrap();
         drop(client);
 
-        let mut stream = receive_handoff(control_rx).await.unwrap();
+        let mut stream = receive_handoff(&control_rx).await.unwrap();
         let mut out = String::new();
         stream.read_to_string(&mut out).await.unwrap();
         assert_eq!(out, "hello world");
