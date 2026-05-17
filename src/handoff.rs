@@ -1,10 +1,14 @@
+/// AI coded code for getting the connection from sni-router.
+use std::ffi::CString;
 use std::io;
 use std::io::Cursor;
 use std::mem;
 use std::net::TcpStream as StdTcpStream;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::Path;
 use std::pin::Pin;
+use std::ptr;
 use std::task::{Context, Poll};
 
 use futures_util::stream;
@@ -77,6 +81,21 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for PrefixedIo<T> {
 
 pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixDatagram> {
     UnixDatagram::bind(path)
+}
+
+pub fn configure_socket_path(
+    path: impl AsRef<Path>,
+    group: Option<&str>,
+    mode: Option<u32>,
+) -> io::Result<()> {
+    let path = path.as_ref();
+    if let Some(group) = group {
+        chgrp(path, group)?;
+    }
+    if let Some(mode) = mode {
+        chmod(path, mode)?;
+    }
+    Ok(())
 }
 
 pub fn incoming(
@@ -180,6 +199,98 @@ fn set_cloexec(fd: RawFd) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+fn chgrp(path: &Path, group: &str) -> io::Result<()> {
+    let path = path_to_cstring(path)?;
+    let gid = group_to_gid(group)?;
+
+    // SAFETY: path is a valid C string. uid -1 means leave owner unchanged.
+    let ret = unsafe { libc::chown(path.as_ptr(), !0 as libc::uid_t, gid) };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(())
+}
+
+fn chmod(path: &Path, mode: u32) -> io::Result<()> {
+    let path = path_to_cstring(path)?;
+
+    // SAFETY: path is a valid C string and mode came from CLI parsing.
+    let ret = unsafe { libc::chmod(path.as_ptr(), mode as libc::mode_t) };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(())
+}
+
+fn path_to_cstring(path: &Path) -> io::Result<CString> {
+    CString::new(path.as_os_str().as_bytes()).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("path contains an interior NUL byte: {err}"),
+        )
+    })
+}
+
+fn group_to_gid(group: &str) -> io::Result<libc::gid_t> {
+    if let Ok(gid) = group.parse::<libc::gid_t>() {
+        return Ok(gid);
+    }
+
+    let group = CString::new(group).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("group contains an interior NUL byte: {err}"),
+        )
+    })?;
+
+    let mut buf_len = group_buffer_len();
+    loop {
+        let mut group_entry = mem::MaybeUninit::<libc::group>::uninit();
+        let mut result = ptr::null_mut();
+        let mut buf = vec![0; buf_len];
+
+        // SAFETY: all pointers reference writable memory valid for this call.
+        let ret = unsafe {
+            libc::getgrnam_r(
+                group.as_ptr(),
+                group_entry.as_mut_ptr(),
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            )
+        };
+
+        if ret == libc::ERANGE {
+            buf_len *= 2;
+            continue;
+        }
+        if ret != 0 {
+            return Err(io::Error::from_raw_os_error(ret));
+        }
+        if result.is_null() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "group does not exist",
+            ));
+        }
+
+        // SAFETY: getgrnam_r succeeded and initialized group_entry.
+        return Ok(unsafe { group_entry.assume_init().gr_gid });
+    }
+}
+
+fn group_buffer_len() -> usize {
+    // SAFETY: sysconf has no memory safety requirements.
+    let len = unsafe { libc::sysconf(libc::_SC_GETGR_R_SIZE_MAX) };
+    if len > 0 {
+        len as usize
+    } else {
+        16 * 1024
+    }
 }
 
 fn extract_fd(msg: &libc::msghdr) -> io::Result<RawFd> {

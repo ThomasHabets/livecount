@@ -46,6 +46,14 @@ struct Opt {
     #[arg(long)]
     unix_listen: Option<PathBuf>,
 
+    /// Change the Unix socket group after binding.
+    #[arg(long, requires = "unix_listen")]
+    unix_listen_group: Option<String>,
+
+    /// Change the Unix socket mode after binding, parsed as octal.
+    #[arg(long, value_parser = parse_octal_mode, requires = "unix_listen")]
+    unix_listen_mode: Option<u32>,
+
     /// TLS certificate for the direct TCP listener.
     #[arg(long)]
     cert: Option<PathBuf>,
@@ -53,6 +61,15 @@ struct Opt {
     /// TLS private key for the direct TCP listener.
     #[arg(long)]
     key: Option<PathBuf>,
+}
+
+fn parse_octal_mode(value: &str) -> std::result::Result<u32, String> {
+    let mode =
+        u32::from_str_radix(value, 8).map_err(|_| format!("invalid octal mode {value:?}"))?;
+    if mode > 0o7777 {
+        return Err(format!("mode {value:?} is larger than 7777"));
+    }
+    Ok(mode)
 }
 
 async fn metrics_handler() -> Result<impl warp::Reply, warp::Rejection> {
@@ -132,6 +149,17 @@ async fn main() -> Result<()> {
         .map(|path| {
             let listener = handoff::bind(path)
                 .with_context(|| format!("failed to bind Unix socket {}", path.display()))?;
+            handoff::configure_socket_path(
+                path,
+                opt.unix_listen_group.as_deref(),
+                opt.unix_listen_mode,
+            )
+            .with_context(|| {
+                format!(
+                    "failed to configure Unix socket group or mode for {}",
+                    path.display()
+                )
+            })?;
             Ok::<_, anyhow::Error>((path.clone(), listener))
         })
         .transpose()?;
@@ -170,4 +198,22 @@ async fn main() -> Result<()> {
     // warp::serve(routes).run(opt.listen).await;
     // reg.to_owned().stop().await.expect("failed to stop()");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_octal_mode;
+
+    #[test]
+    fn parses_unix_socket_mode_as_octal() {
+        assert_eq!(parse_octal_mode("660").unwrap(), 0o660);
+        assert_eq!(parse_octal_mode("0660").unwrap(), 0o660);
+        assert_eq!(parse_octal_mode("1777").unwrap(), 0o1777);
+    }
+
+    #[test]
+    fn rejects_invalid_unix_socket_modes() {
+        assert!(parse_octal_mode("668").is_err());
+        assert!(parse_octal_mode("10000").is_err());
+    }
 }
