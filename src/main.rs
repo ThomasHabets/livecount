@@ -12,15 +12,26 @@ mod registry;
 
 use registry::Registry;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
 #[derive(Parser, Debug)]
 #[command(version)]
 struct Opt {
     /// Silence all output
     #[arg(short, long)]
     quiet: bool,
-    /// Verbose mode (-v, -vv, -vvv, etc)
+
+    /// Verbose mode.
     #[arg(short)]
-    verbose: usize,
+    verbose: LogLevel,
+
     /// Timestamp (sec, ms, ns, none)
     #[arg(short, long = "timestamp")]
     ts: Option<stderrlog::Timestamp>,
@@ -76,7 +87,7 @@ async fn main() -> Result<()> {
     stderrlog::new()
         .module(module_path!())
         .quiet(opt.quiet)
-        .verbosity(opt.verbose)
+        .verbosity(opt.verbose as usize)
         .timestamp(opt.ts.unwrap_or(stderrlog::Timestamp::Second))
         .init()
         .expect("Failed to initialize logging");
