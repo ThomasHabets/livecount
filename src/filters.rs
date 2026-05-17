@@ -99,13 +99,18 @@ async fn livecount_ws_map_upgrade(
     };
     new_sleep_ping_renew().await;
 
-    // TODO: why 10?
+    // TODO: why 10? Once it's more in flight, we terminate the connection.
     let (to_client_tx, mut to_client_rx) = tokio::sync::mpsc::channel(10);
 
     // Async that gets updates from the registry.
     let from_registry = async {
         while let Some(msg) = handle.next().await {
-            if let Err(e) = to_client_tx.send(Message::text(format!("{msg}"))).await {
+            // If client has become unresponsive, we'll close the connection
+            // after 10 in flight messages.
+            //
+            // We don't want to block here since it can deadlock the register,
+            // as we're then no longer reading from the handle in the loop.
+            if let Err(e) = to_client_tx.try_send(Message::text(format!("{msg}"))) {
                 error!("Failed to send to client-sender: {e:?}");
                 return Err("failed to send to client-sender".to_owned());
             }
