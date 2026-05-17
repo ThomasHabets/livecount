@@ -203,6 +203,15 @@ impl Registry {
                         "After register: {} active connections (key {key})",
                         tx_map.len()
                     );
+
+                    // Confirm that all this key's subscribers are all there.
+                    let removed: Vec<_> = entry
+                        .extract_if(|id| tx_map.get(id).map(|s| s.is_closed()).unwrap_or(true))
+                        .collect();
+                    for removed in removed {
+                        tx_map.remove(&removed);
+                    }
+
                     TOTAL_ACTIVE.set(i64::try_from(tx_map.len()).unwrap());
                     PAGE_ACTIVE.with_label_values(&[&key]).inc();
                     Self::publish(&tx_map, entry, u64::try_from(count).unwrap()).await;
