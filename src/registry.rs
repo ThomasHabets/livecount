@@ -162,12 +162,11 @@ impl Registry {
             if false {
                 trace!("Sending to id {}", id);
             }
-            let e = txm.get(id);
-            if e.is_none() {
-                warn!("Wanted to publish to channel ID {}, but missing", id);
+            let Some(e) = txm.get(id) else {
+                warn!("Wanted to publish to channel ID {id}, but missing");
                 continue;
-            }
-            if let Err(err) = e.unwrap().send(v).await {
+            };
+            if let Err(err) = e.try_send(v) {
                 warn!("Failed to publish to channel ID {}: {}", id, err);
                 continue;
             }
