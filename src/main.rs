@@ -1,13 +1,15 @@
 // Allow single element loop to make metric initialization consistent.
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use log::info;
 use warp::Filter;
 //use prometheus
 
 mod filters;
+mod handoff;
 mod registry;
 
 use registry::Registry;
@@ -36,13 +38,21 @@ struct Opt {
     #[arg(short, long = "timestamp")]
     ts: Option<stderrlog::Timestamp>,
 
-    #[arg(long, default_value = "[::1]:8000")]
-    listen: std::net::SocketAddr,
+    /// Listen directly on TCP/TLS at this address.
+    #[arg(long)]
+    listen: Option<std::net::SocketAddr>,
 
+    /// Listen for plain HTTP socket handoffs on this Unix socket.
     #[arg(long)]
-    cert: std::path::PathBuf,
+    unix_listen: Option<PathBuf>,
+
+    /// TLS certificate for the direct TCP listener.
     #[arg(long)]
-    key: std::path::PathBuf,
+    cert: Option<PathBuf>,
+
+    /// TLS private key for the direct TCP listener.
+    #[arg(long)]
+    key: Option<PathBuf>,
 }
 
 async fn metrics_handler() -> Result<impl warp::Reply, warp::Rejection> {
@@ -98,12 +108,63 @@ async fn main() -> Result<()> {
         .or(warp::path!("livecount" / "metrics").and_then(metrics_handler));
     let routes = api.with(warp::log("livecount"));
 
-    warp::serve(routes)
-        .tls()
-        .cert_path(opt.cert)
-        .key_path(opt.key)
-        .run(opt.listen)
-        .await;
+    let tcp = if let Some(listen) = opt.listen {
+        let cert = opt
+            .cert
+            .clone()
+            .context("--cert is required when --listen is used")?;
+        let key = opt
+            .key
+            .clone()
+            .context("--key is required when --listen is used")?;
+        Some((listen, cert, key))
+    } else {
+        None
+    };
+
+    if opt.unix_listen.is_none() && tcp.is_none() {
+        bail!("at least one of --unix-listen or --listen must be specified");
+    }
+
+    let unix = opt
+        .unix_listen
+        .as_ref()
+        .map(|path| {
+            let listener = handoff::bind(path)
+                .with_context(|| format!("failed to bind Unix socket {}", path.display()))?;
+            Ok::<_, anyhow::Error>((path.clone(), listener))
+        })
+        .transpose()?;
+
+    match (unix, tcp) {
+        (Some((path, listener)), Some((listen, cert, key))) => {
+            info!("Listening for socket handoffs on {}", path.display());
+            info!("Listening directly on TCP/TLS at {listen}");
+            let unix_server = warp::serve(routes.clone()).run_incoming(handoff::incoming(listener));
+            let tcp_server = warp::serve(routes)
+                .tls()
+                .cert_path(cert)
+                .key_path(key)
+                .run(listen);
+            tokio::join!(unix_server, tcp_server);
+        }
+        (Some((path, listener)), None) => {
+            info!("Listening for socket handoffs on {}", path.display());
+            warp::serve(routes)
+                .run_incoming(handoff::incoming(listener))
+                .await;
+        }
+        (None, Some((listen, cert, key))) => {
+            info!("Listening directly on TCP/TLS at {listen}");
+            warp::serve(routes)
+                .tls()
+                .cert_path(cert)
+                .key_path(key)
+                .run(listen)
+                .await;
+        }
+        (None, None) => unreachable!("listener configuration was already validated"),
+    }
 
     // Plain HTTP serving.
     // warp::serve(routes).run(opt.listen).await;

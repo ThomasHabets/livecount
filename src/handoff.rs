@@ -1,0 +1,311 @@
+use std::io;
+use std::io::Cursor;
+use std::mem;
+use std::net::TcpStream as StdTcpStream;
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::path::Path;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use futures_util::stream;
+use log::warn;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpStream, UnixListener, UnixStream};
+
+const MAX_INITIAL_DATA: usize = 1024 * 1024;
+const CMSG_SPACE_FD: usize =
+    unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as libc::c_uint) as usize };
+
+#[repr(C)]
+union CmsgSpace {
+    header: libc::cmsghdr,
+    bytes: [u8; CMSG_SPACE_FD],
+}
+
+pub type PrefixedTcpStream = PrefixedIo<TcpStream>;
+
+pub struct PrefixedIo<T> {
+    prefix: Cursor<Vec<u8>>,
+    inner: T,
+}
+
+impl<T> PrefixedIo<T> {
+    fn new(inner: T, prefix: Vec<u8>) -> Self {
+        Self {
+            prefix: Cursor::new(prefix),
+            inner,
+        }
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for PrefixedIo<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let pos = self.prefix.position() as usize;
+        let prefix = self.prefix.get_ref();
+        if pos < prefix.len() {
+            let len = (prefix.len() - pos).min(buf.remaining());
+            buf.put_slice(&prefix[pos..pos + len]);
+            self.prefix.set_position((pos + len) as u64);
+            return Poll::Ready(Ok(()));
+        }
+
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for PrefixedIo<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixListener> {
+    UnixListener::bind(path)
+}
+
+pub fn incoming(
+    listener: UnixListener,
+) -> impl futures_util::Stream<Item = io::Result<PrefixedTcpStream>> + Send {
+    stream::unfold(listener, |listener| async move {
+        let item = accept_handoff(&listener).await;
+        Some((item, listener))
+    })
+}
+
+async fn accept_handoff(listener: &UnixListener) -> io::Result<PrefixedTcpStream> {
+    loop {
+        let (control, _addr) = listener.accept().await?;
+        match receive_handoff(control).await {
+            Ok(stream) => return Ok(stream),
+            Err(err) => warn!("failed to receive socket handoff: {err}"),
+        }
+    }
+}
+
+async fn receive_handoff(control: UnixStream) -> io::Result<PrefixedTcpStream> {
+    loop {
+        control.readable().await?;
+        match recv_handoff(control.as_raw_fd()) {
+            Ok((initial_data, fd)) => {
+                let stream = tcp_stream_from_fd(fd)?;
+                return Ok(PrefixedIo::new(stream, initial_data));
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn tcp_stream_from_fd(fd: RawFd) -> io::Result<TcpStream> {
+    // SAFETY: recv_handoff returns ownership of this descriptor via SCM_RIGHTS.
+    let std_stream = unsafe { StdTcpStream::from_raw_fd(fd) };
+    std_stream.set_nonblocking(true)?;
+    TcpStream::from_std(std_stream)
+}
+
+fn recv_handoff(control_fd: RawFd) -> io::Result<(Vec<u8>, RawFd)> {
+    let mut initial_data = vec![0; MAX_INITIAL_DATA];
+    let mut iov = libc::iovec {
+        iov_base: initial_data.as_mut_ptr().cast(),
+        iov_len: initial_data.len(),
+    };
+    let mut control = CmsgSpace {
+        bytes: [0; CMSG_SPACE_FD],
+    };
+
+    // SAFETY: msghdr is fully initialized before it is passed to recvmsg.
+    let mut msg: libc::msghdr = unsafe { mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = unsafe { control.bytes.as_mut_ptr().cast() };
+    msg.msg_controllen = CMSG_SPACE_FD;
+
+    // SAFETY: msg points to valid data/control buffers for recvmsg to fill.
+    let nread = unsafe { libc::recvmsg(control_fd, &mut msg, 0) };
+    if nread < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if nread == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "handoff connection closed before passing a file descriptor",
+        ));
+    }
+    if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "handoff control message was truncated",
+        ));
+    }
+
+    initial_data.truncate(nread as usize);
+    let fd = extract_fd(&msg)?;
+    if let Err(err) = set_cloexec(fd) {
+        // SAFETY: fd was just received via SCM_RIGHTS and has not been
+        // transferred to any Rust owner yet.
+        unsafe {
+            libc::close(fd);
+        }
+        return Err(err);
+    }
+    Ok((initial_data, fd))
+}
+
+fn set_cloexec(fd: RawFd) -> io::Result<()> {
+    // SAFETY: fcntl is called with a valid descriptor received from the OS.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // SAFETY: fcntl is called with a valid descriptor and descriptor flags.
+    let ret = unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(())
+}
+
+fn extract_fd(msg: &libc::msghdr) -> io::Result<RawFd> {
+    let mut found_fd = None;
+
+    // SAFETY: msg was filled by recvmsg, and libc CMSG helpers walk only the
+    // control buffer described by msg.
+    unsafe {
+        let mut cmsg = libc::CMSG_FIRSTHDR(msg);
+        while !cmsg.is_null() {
+            let header = &*cmsg;
+            if header.cmsg_level == libc::SOL_SOCKET && header.cmsg_type == libc::SCM_RIGHTS {
+                let data_len = header.cmsg_len.saturating_sub(libc::CMSG_LEN(0) as usize);
+                let fd_count = data_len / mem::size_of::<RawFd>();
+                let data = libc::CMSG_DATA(cmsg).cast::<RawFd>();
+
+                for i in 0..fd_count {
+                    let fd = data.add(i).read_unaligned();
+                    if found_fd.is_none() {
+                        found_fd = Some(fd);
+                    } else {
+                        libc::close(fd);
+                    }
+                }
+            }
+            cmsg = libc::CMSG_NXTHDR(msg, cmsg);
+        }
+    }
+
+    found_fd.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "handoff did not include a file descriptor",
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::net::{TcpListener, TcpStream as StdTcpStream};
+    use std::os::unix::io::AsRawFd;
+    use std::os::unix::net::UnixStream as StdUnixStream;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::{receive_handoff, CmsgSpace, PrefixedIo, CMSG_SPACE_FD};
+
+    #[tokio::test]
+    async fn reads_prefix_before_inner_stream() {
+        let (client, mut server) = tokio::io::duplex(64);
+        let mut stream = PrefixedIo::new(client, b"hello ".to_vec());
+
+        server.write_all(b"world").await.unwrap();
+        drop(server);
+
+        let mut out = String::new();
+        stream.read_to_string(&mut out).await.unwrap();
+        assert_eq!(out, "hello world");
+    }
+
+    #[tokio::test]
+    async fn receives_fd_and_initial_data() {
+        let (control_tx, control_rx) = StdUnixStream::pair().unwrap();
+        control_rx.set_nonblocking(true).unwrap();
+        let control_rx = tokio::net::UnixStream::from_std(control_rx).unwrap();
+
+        let (mut client, server) = tcp_pair();
+        send_fd_with_data(control_tx.as_raw_fd(), server.as_raw_fd(), b"hello ").unwrap();
+        drop(server);
+
+        client.write_all(b"world").unwrap();
+        drop(client);
+
+        let mut stream = receive_handoff(control_rx).await.unwrap();
+        let mut out = String::new();
+        stream.read_to_string(&mut out).await.unwrap();
+        assert_eq!(out, "hello world");
+    }
+
+    fn tcp_pair() -> (StdTcpStream, StdTcpStream) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let client = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _addr) = listener.accept().unwrap();
+        (client, server)
+    }
+
+    fn send_fd_with_data(
+        socket_fd: libc::c_int,
+        fd_to_send: libc::c_int,
+        data: &[u8],
+    ) -> std::io::Result<usize> {
+        let mut data = data.to_vec();
+        let mut iov = libc::iovec {
+            iov_base: data.as_mut_ptr().cast(),
+            iov_len: data.len(),
+        };
+        let mut control = CmsgSpace {
+            bytes: [0; CMSG_SPACE_FD],
+        };
+
+        // SAFETY: msghdr and cmsghdr are initialized below before sendmsg.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = unsafe { control.bytes.as_mut_ptr().cast() };
+        msg.msg_controllen = CMSG_SPACE_FD;
+
+        // SAFETY: msg has a valid control buffer large enough for one fd.
+        let written = unsafe {
+            let cmsg = libc::CMSG_FIRSTHDR(&msg);
+            (*cmsg).cmsg_level = libc::SOL_SOCKET;
+            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+            (*cmsg).cmsg_len =
+                libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as libc::c_uint) as usize;
+            libc::CMSG_DATA(cmsg)
+                .cast::<libc::c_int>()
+                .write(fd_to_send);
+            libc::sendmsg(socket_fd, &msg, 0)
+        };
+
+        if written < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(written as usize)
+        }
+    }
+}
