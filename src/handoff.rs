@@ -16,7 +16,7 @@ use std::task::{Context, Poll};
 
 use futures_util::stream;
 use log::warn;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, Interest, ReadBuf};
 use tokio::net::{TcpStream, UnixDatagram};
 
 const MAX_INITIAL_DATA: usize = 1024 * 1024;
@@ -128,17 +128,11 @@ async fn next_handoff(socket: &UnixDatagram) -> io::Result<PrefixedTcpStream> {
 }
 
 async fn receive_handoff(socket: &UnixDatagram) -> io::Result<PrefixedTcpStream> {
-    loop {
-        socket.readable().await?;
-        match recv_handoff(socket.as_raw_fd()) {
-            Ok((initial_data, fd)) => {
-                let stream = tcp_stream_from_fd(fd)?;
-                return Ok(PrefixedIo::new(stream, initial_data));
-            }
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
-            Err(err) => return Err(err),
-        }
-    }
+    let (initial_data, fd) = socket
+        .async_io(Interest::READABLE, || recv_handoff(socket.as_raw_fd()))
+        .await?;
+    let stream = tcp_stream_from_fd(fd)?;
+    Ok(PrefixedIo::new(stream, initial_data))
 }
 
 fn tcp_stream_from_fd(fd: RawFd) -> io::Result<TcpStream> {
