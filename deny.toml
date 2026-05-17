@@ -7,7 +7,7 @@ ignore = [
     # rustls-pemfile is unmaintained, but it's used by warp 0.3.
     "RUSTSEC-2025-0134",
 
-    # TODO: fix.
+    # These are all because warp 0.3, so we need to get off of warp 0.3.
     "RUSTSEC-2026-0104",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0098",
