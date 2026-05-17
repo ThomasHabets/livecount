@@ -1,11 +1,14 @@
 /// AI coded code for getting the connection from sni-router.
 use std::ffi::CString;
+use std::fs;
 use std::io;
 use std::io::Cursor;
 use std::mem;
 use std::net::TcpStream as StdTcpStream;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::net::UnixDatagram as StdUnixDatagram;
 use std::path::Path;
 use std::pin::Pin;
 use std::ptr;
@@ -80,7 +83,15 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for PrefixedIo<T> {
 }
 
 pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixDatagram> {
-    UnixDatagram::bind(path)
+    let path = path.as_ref();
+    match UnixDatagram::bind(path) {
+        Ok(socket) => Ok(socket),
+        Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
+            remove_stale_socket(path)?;
+            UnixDatagram::bind(path)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 pub fn configure_socket_path(
@@ -199,6 +210,33 @@ fn set_cloexec(fd: RawFd) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+fn remove_stale_socket(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_socket() => {}
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!("{} exists and is not a Unix socket", path.display()),
+            ));
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    }
+
+    match StdUnixDatagram::unbound()?.connect(path) {
+        Ok(()) => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!("{} is already in use by another process", path.display()),
+        )),
+        Err(err) if err.kind() == io::ErrorKind::ConnectionRefused => {
+            warn!("removing stale Unix socket {}", path.display());
+            fs::remove_file(path)
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 fn chgrp(path: &Path, group: &str) -> io::Result<()> {
@@ -330,14 +368,20 @@ fn extract_fd(msg: &libc::msghdr) -> io::Result<RawFd> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io::Write;
     use std::net::{TcpListener, TcpStream as StdTcpStream};
+    use std::os::unix::fs::FileTypeExt;
     use std::os::unix::io::AsRawFd;
     use std::os::unix::net::UnixDatagram as StdUnixDatagram;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use super::{receive_handoff, CmsgSpace, PrefixedIo, CMSG_SPACE_FD};
+    use super::{bind, receive_handoff, CmsgSpace, PrefixedIo, CMSG_SPACE_FD};
+
+    static NEXT_SOCKET: AtomicUsize = AtomicUsize::new(0);
 
     #[tokio::test]
     async fn reads_prefix_before_inner_stream() {
@@ -371,11 +415,59 @@ mod tests {
         assert_eq!(out, "hello world");
     }
 
+    #[tokio::test]
+    async fn bind_removes_stale_socket_file() {
+        let path = temp_socket_path("stale");
+        cleanup_socket_path(&path);
+
+        let stale = StdUnixDatagram::bind(&path).unwrap();
+        drop(stale);
+
+        let socket = bind(&path).unwrap();
+        drop(socket);
+
+        cleanup_socket_path(&path);
+    }
+
+    #[tokio::test]
+    async fn bind_does_not_remove_active_socket_file() {
+        let path = temp_socket_path("active");
+        cleanup_socket_path(&path);
+
+        let active = StdUnixDatagram::bind(&path).unwrap();
+        let err = match bind(&path) {
+            Ok(_) => panic!("bind unexpectedly replaced an active socket"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_socket());
+
+        drop(active);
+        cleanup_socket_path(&path);
+    }
+
     fn tcp_pair() -> (StdTcpStream, StdTcpStream) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let client = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (server, _addr) = listener.accept().unwrap();
         (client, server)
+    }
+
+    fn temp_socket_path(name: &str) -> PathBuf {
+        let next = NEXT_SOCKET.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "livecount-{name}-{}-{next}.sock",
+            std::process::id()
+        ))
+    }
+
+    fn cleanup_socket_path(path: &PathBuf) {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => panic!("failed to remove {}: {err}", path.display()),
+        }
     }
 
     fn send_fd_with_data(
