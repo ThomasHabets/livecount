@@ -31,7 +31,7 @@ struct Opt {
     quiet: bool,
 
     /// Verbose mode.
-    #[arg(short)]
+    #[arg(short, default_value = "info")]
     verbose: LogLevel,
 
     /// Timestamp (sec, ms, ns, none)
