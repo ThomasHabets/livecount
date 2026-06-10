@@ -7,6 +7,8 @@ use futures_util::{SinkExt, StreamExt};
 use log::{debug, error, info, trace, warn};
 use tokio::time::Duration;
 use warp::http::header::HeaderMap;
+use warp::http::StatusCode;
+use warp::reply::Response;
 use warp::ws::{Message, WebSocket};
 use warp::Filter;
 use warp::Reply;
@@ -34,6 +36,80 @@ const MAX_WS_LIFE_PING: Duration = Duration::from_secs(MAX_WS_LIFE_PING_SECS);
 
 /// Timeout for sending websocket message.
 const MAX_WS_SEND_TIME: Duration = Duration::from_secs(5);
+
+#[derive(Debug)]
+enum WsRequestError {
+    MissingLocation,
+    InvalidLocation(url::ParseError),
+    MissingOrigin,
+    InvalidOrigin(url::ParseError),
+    OriginMismatch { origin: String, url: String },
+}
+
+impl WsRequestError {
+    fn status(&self) -> StatusCode {
+        match self {
+            Self::MissingLocation | Self::InvalidLocation(_) => StatusCode::BAD_REQUEST,
+            Self::MissingOrigin | Self::InvalidOrigin(_) | Self::OriginMismatch { .. } => {
+                StatusCode::FORBIDDEN
+            }
+        }
+    }
+
+    fn client_message(&self) -> &'static str {
+        match self {
+            Self::MissingLocation => "missing livecount page URL",
+            Self::InvalidLocation(_) => "invalid livecount page URL",
+            Self::MissingOrigin => "missing websocket origin",
+            Self::InvalidOrigin(_) => "invalid websocket origin",
+            Self::OriginMismatch { .. } => "websocket origin does not match page URL",
+        }
+    }
+}
+
+impl std::fmt::Display for WsRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingLocation => write!(f, "missing l query parameter"),
+            Self::InvalidLocation(err) => write!(f, "invalid l query parameter: {err}"),
+            Self::MissingOrigin => write!(f, "missing Origin header"),
+            Self::InvalidOrigin(err) => write!(f, "invalid Origin header: {err}"),
+            Self::OriginMismatch { origin, url } => {
+                write!(f, "Origin {origin:?} does not match page URL {url:?}")
+            }
+        }
+    }
+}
+
+fn websocket_error_response(err: &WsRequestError) -> Response {
+    warp::reply::with_status(err.client_message(), err.status()).into_response()
+}
+
+fn livecount_url_from_query(
+    querymap: &HashMap<String, String>,
+) -> Result<url::Url, WsRequestError> {
+    let location = querymap.get("l").ok_or(WsRequestError::MissingLocation)?;
+    let mut url = url::Url::parse(location).map_err(WsRequestError::InvalidLocation)?;
+    url.set_query(None);
+    Ok(url)
+}
+
+fn validate_origin(url: &url::Url, origin: Option<&str>) -> Result<(), WsRequestError> {
+    let origin = origin.ok_or(WsRequestError::MissingOrigin)?;
+    let origin_url = url::Url::parse(origin).map_err(WsRequestError::InvalidOrigin)?;
+
+    if url.scheme() == origin_url.scheme()
+        && url.host_str() == origin_url.host_str()
+        && url.port_or_known_default() == origin_url.port_or_known_default()
+    {
+        return Ok(());
+    }
+
+    Err(WsRequestError::OriginMismatch {
+        origin: origin.to_owned(),
+        url: url.as_str().to_owned(),
+    })
+}
 
 pub fn livecount(
     reg: Arc<Registry>,
@@ -283,7 +359,7 @@ fn livecount_ws_map(
     _heads: HeaderMap,
     querymap: HashMap<String, String>,
     inreg: Arc<Registry>,
-) -> impl Reply {
+) -> Response {
     debug!("livecount_ws_map()");
     let reg = inreg.clone();
     // TODO: smarter x-forwarded-for parsing.
@@ -291,20 +367,24 @@ fn livecount_ws_map(
         Some(ra) => format!("{:?}", ra),
         None => "unknown".to_string(),
     };
-    let Some(Ok(mut url)) = querymap.get("l").map(|s| url::Url::parse(s)) else {
-        panic!();
-    };
-    url.set_query(None);
 
-    {
-        let want = format!("{}/", origin.clone().unwrap_or_default());
-        if !url.as_str().starts_with(&want) {
-            warn!("ERROR: wrong origin {url}, want starts with {origin:?}");
+    let url = match livecount_url_from_query(&querymap) {
+        Ok(url) => url,
+        Err(err) => {
+            warn!("Rejecting websocket request: {err}");
+            return websocket_error_response(&err);
         }
+    };
+
+    if let Err(err) = validate_origin(&url, origin.as_deref()) {
+        warn!("Rejecting websocket request: {err}");
+        return websocket_error_response(&err);
     }
+
     ws.on_upgrade(move |websocket| async move {
         livecount_ws_map_upgrade(websocket, remote, &url, reg).await;
     })
+    .into_response()
 }
 
 fn livecount_ws(
@@ -371,4 +451,56 @@ reconnect();
 "#,
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{livecount_url_from_query, validate_origin, WsRequestError};
+
+    #[test]
+    fn rejects_missing_or_invalid_livecount_url() {
+        let querymap = HashMap::new();
+        assert!(matches!(
+            livecount_url_from_query(&querymap),
+            Err(WsRequestError::MissingLocation)
+        ));
+
+        let querymap = HashMap::from([("l".to_string(), "not a url".to_string())]);
+        assert!(matches!(
+            livecount_url_from_query(&querymap),
+            Err(WsRequestError::InvalidLocation(_))
+        ));
+    }
+
+    #[test]
+    fn strips_query_from_livecount_url() {
+        let querymap = HashMap::from([(
+            "l".to_string(),
+            "https://example.test/page?cachebust=1".to_string(),
+        )]);
+
+        let url = livecount_url_from_query(&querymap).unwrap();
+        assert_eq!(url.as_str(), "https://example.test/page");
+    }
+
+    #[test]
+    fn validates_origin_against_livecount_url() {
+        let url = url::Url::parse("https://example.test:443/page").unwrap();
+
+        assert!(validate_origin(&url, Some("https://example.test")).is_ok());
+        assert!(matches!(
+            validate_origin(&url, None),
+            Err(WsRequestError::MissingOrigin)
+        ));
+        assert!(matches!(
+            validate_origin(&url, Some("https://evil.test")),
+            Err(WsRequestError::OriginMismatch { .. })
+        ));
+        assert!(matches!(
+            validate_origin(&url, Some("not a url")),
+            Err(WsRequestError::InvalidOrigin(_))
+        ));
+    }
 }
