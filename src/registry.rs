@@ -14,60 +14,74 @@ use tokio::time::Duration;
 
 const CHANNEL_SIZE: usize = 10_000;
 
+pub static REGISTRY: LazyLock<PromReg> = LazyLock::new(PromReg::new);
+
 pub static PING_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
     use prometheus::HistogramOpts;
-    Histogram::with_opts(
+    let metric = Histogram::with_opts(
         HistogramOpts::new("ping_latency_ms", "Ping latency")
             .buckets(prometheus::exponential_buckets(1.0, 2.0f64.sqrt(), 20).unwrap()),
     )
-    .unwrap()
+    .unwrap();
+    REGISTRY.register(Box::new(metric.clone())).unwrap();
+    metric
 });
 
-pub static REGISTRY: LazyLock<PromReg> = LazyLock::new(PromReg::new);
-
-// When adding a new metric, one must also add it to the impl Registry fn
-// new, below.
 pub static TOTAL_ACTIVE: LazyLock<IntGauge> = LazyLock::new(|| {
-    IntGauge::new("total_active", "Total active sessions").expect("metric can't be created")
+    let metric =
+        IntGauge::new("total_active", "Total active sessions").expect("metric can't be created");
+    REGISTRY.register(Box::new(metric.clone())).unwrap();
+    metric
 });
+
 pub static PAGE_ACTIVE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
-    IntGaugeVec::new(
+    let metric = IntGaugeVec::new(
         prometheus::Opts::new("page_active", "Active sessions per page"),
         &["page"],
     )
-    .expect("failed to create page_active metric")
+    .expect("failed to create page_active metric");
+    REGISTRY.register(Box::new(metric.clone())).unwrap();
+    metric
 });
 
 pub static TIMEOUTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
-    IntCounterVec::new(
+    let metric = IntCounterVec::new(
         prometheus::Opts::new("timeouts", "Websocket timeout counter"),
         &["type"],
     )
-    .expect("failed to create timeouts metric")
+    .expect("failed to create timeouts metric");
+    REGISTRY.register(Box::new(metric.clone())).unwrap();
+    metric
 });
 
 pub static UPDATES_SENT: LazyLock<IntCounterVec> = LazyLock::new(|| {
-    IntCounterVec::new(
+    let metric = IntCounterVec::new(
         prometheus::Opts::new(
             "updates_sent",
             "Total updates sent across all websockets to all clients.",
         ),
         &["type", "status"],
     )
-    .expect("failed to create metric")
+    .expect("failed to create metric");
+    REGISTRY.register(Box::new(metric.clone())).unwrap();
+    metric
 });
 
 pub static REGISTRATIONS: LazyLock<IntCounter> = LazyLock::new(|| {
-    IntCounter::new("registrations", "Total websocket registrations.")
-        .expect("failed to create metric")
+    let metric = IntCounter::new("registrations", "Total websocket registrations.")
+        .expect("failed to create metric");
+    REGISTRY.register(Box::new(metric.clone())).unwrap();
+    metric
 });
 
 pub static WS_RX_TYPE: LazyLock<IntCounterVec> = LazyLock::new(|| {
-    IntCounterVec::new(
+    let metric = IntCounterVec::new(
         prometheus::Opts::new("websocket_rx", "Received websocket messages, by type."),
         &["type"],
     )
-    .expect("failed to create metric")
+    .expect("failed to create metric");
+    REGISTRY.register(Box::new(metric.clone())).unwrap();
+    metric
 });
 
 #[cfg(test)]
@@ -122,34 +136,7 @@ pub struct Registry {
 }
 
 impl Registry {
-    #[allow(clippy::single_element_loop)]
     pub fn new() -> Registry {
-        REGISTRY
-            .register(Box::new(TOTAL_ACTIVE.clone()))
-            .expect("failed to register");
-        REGISTRY
-            .register(Box::new(PAGE_ACTIVE.clone()))
-            .expect("failed to register page_active");
-        for metric in [REGISTRATIONS.clone()].into_iter() {
-            REGISTRY
-                .register(Box::new(metric))
-                .expect("failed to register metric");
-        }
-        for metric in [TIMEOUTS.clone()].into_iter() {
-            REGISTRY
-                .register(Box::new(metric))
-                .expect("failed to register metric");
-        }
-        for metric in [WS_RX_TYPE.clone(), UPDATES_SENT.clone()].into_iter() {
-            REGISTRY
-                .register(Box::new(metric))
-                .expect("failed to register metric");
-        }
-        for metric in [PING_LATENCY.clone()].into_iter() {
-            REGISTRY
-                .register(Box::new(metric))
-                .expect("failed to register metric");
-        }
         let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
         Registry {
             ch: tx.clone(),
