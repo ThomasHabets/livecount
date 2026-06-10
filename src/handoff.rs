@@ -7,7 +7,7 @@ use std::mem;
 use std::net::TcpStream as StdTcpStream;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileTypeExt;
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixDatagram as StdUnixDatagram;
 use std::path::Path;
 use std::pin::Pin;
@@ -135,14 +135,13 @@ async fn receive_handoff(socket: &UnixDatagram) -> io::Result<PrefixedTcpStream>
     Ok(PrefixedIo::new(stream, initial_data))
 }
 
-fn tcp_stream_from_fd(fd: RawFd) -> io::Result<TcpStream> {
-    // SAFETY: recv_handoff returns ownership of this descriptor via SCM_RIGHTS.
-    let std_stream = unsafe { StdTcpStream::from_raw_fd(fd) };
+fn tcp_stream_from_fd(fd: OwnedFd) -> io::Result<TcpStream> {
+    let std_stream = StdTcpStream::from(fd);
     std_stream.set_nonblocking(true)?;
     TcpStream::from_std(std_stream)
 }
 
-fn recv_handoff(control_fd: RawFd) -> io::Result<(Vec<u8>, RawFd)> {
+fn recv_handoff(control_fd: RawFd) -> io::Result<(Vec<u8>, OwnedFd)> {
     let mut initial_data = vec![0; MAX_INITIAL_DATA];
     let mut iov = libc::iovec {
         iov_base: initial_data.as_mut_ptr().cast(),
@@ -164,6 +163,8 @@ fn recv_handoff(control_fd: RawFd) -> io::Result<(Vec<u8>, RawFd)> {
     if nread < 0 {
         return Err(io::Error::last_os_error());
     }
+
+    let mut fds = extract_fds(&msg);
     if msg.msg_flags & libc::MSG_CTRUNC != 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -178,15 +179,14 @@ fn recv_handoff(control_fd: RawFd) -> io::Result<(Vec<u8>, RawFd)> {
     }
 
     initial_data.truncate(nread as usize);
-    let fd = extract_fd(&msg)?;
-    if let Err(err) = set_cloexec(fd) {
-        // SAFETY: fd was just received via SCM_RIGHTS and has not been
-        // transferred to any Rust owner yet.
-        unsafe {
-            libc::close(fd);
-        }
-        return Err(err);
+    if fds.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "handoff did not include a file descriptor",
+        ));
     }
+    let fd = fds.remove(0);
+    set_cloexec(fd.as_raw_fd())?;
     Ok((initial_data, fd))
 }
 
@@ -325,8 +325,8 @@ fn group_buffer_len() -> usize {
     }
 }
 
-fn extract_fd(msg: &libc::msghdr) -> io::Result<RawFd> {
-    let mut found_fd = None;
+fn extract_fds(msg: &libc::msghdr) -> Vec<OwnedFd> {
+    let mut fds = Vec::new();
 
     // SAFETY: msg was filled by recvmsg, and libc CMSG helpers walk only the
     // control buffer described by msg.
@@ -341,23 +341,14 @@ fn extract_fd(msg: &libc::msghdr) -> io::Result<RawFd> {
 
                 for i in 0..fd_count {
                     let fd = data.add(i).read_unaligned();
-                    if found_fd.is_none() {
-                        found_fd = Some(fd);
-                    } else {
-                        libc::close(fd);
-                    }
+                    fds.push(OwnedFd::from_raw_fd(fd));
                 }
             }
             cmsg = libc::CMSG_NXTHDR(msg, cmsg);
         }
     }
 
-    found_fd.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "handoff did not include a file descriptor",
-        )
-    })
+    fds
 }
 
 #[cfg(test)]
@@ -368,7 +359,7 @@ mod tests {
     use std::os::unix::fs::FileTypeExt;
     use std::os::unix::io::AsRawFd;
     use std::os::unix::net::UnixDatagram as StdUnixDatagram;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -376,6 +367,15 @@ mod tests {
     use super::{bind, receive_handoff, CmsgSpace, PrefixedIo, CMSG_SPACE_FD};
 
     static NEXT_SOCKET: AtomicUsize = AtomicUsize::new(0);
+    const CMSG_SPACE_THREE_FDS: usize = unsafe {
+        libc::CMSG_SPACE((3 * std::mem::size_of::<libc::c_int>()) as libc::c_uint) as usize
+    };
+
+    #[repr(C)]
+    union ThreeFdCmsgSpace {
+        header: libc::cmsghdr,
+        bytes: [u8; CMSG_SPACE_THREE_FDS],
+    }
 
     #[tokio::test]
     async fn reads_prefix_before_inner_stream() {
@@ -407,6 +407,30 @@ mod tests {
         let mut out = String::new();
         stream.read_to_string(&mut out).await.unwrap();
         assert_eq!(out, "hello world");
+    }
+
+    #[tokio::test]
+    async fn closes_received_fds_when_control_message_is_truncated() {
+        let (control_tx, control_rx) = StdUnixDatagram::pair().unwrap();
+        control_rx.set_nonblocking(true).unwrap();
+        let control_rx = tokio::net::UnixDatagram::from_std(control_rx).unwrap();
+
+        let (_client, server) = tcp_pair();
+        let Some(server_target) = fd_target(server.as_raw_fd()) else {
+            return;
+        };
+        let Some(before) = count_fds_pointing_to(&server_target) else {
+            return;
+        };
+
+        send_three_fds_with_data(control_tx.as_raw_fd(), server.as_raw_fd(), b"hello").unwrap();
+        let err = match receive_handoff(&control_rx).await {
+            Ok(_) => panic!("handoff unexpectedly accepted a truncated control message"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(count_fds_pointing_to(&server_target), Some(before));
     }
 
     #[tokio::test]
@@ -464,6 +488,20 @@ mod tests {
         }
     }
 
+    fn fd_target(fd: libc::c_int) -> Option<PathBuf> {
+        fs::read_link(format!("/proc/self/fd/{fd}")).ok()
+    }
+
+    fn count_fds_pointing_to(target: &Path) -> Option<usize> {
+        let entries = fs::read_dir("/proc/self/fd").ok()?;
+        let count = entries
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| fs::read_link(entry.path()).ok())
+            .filter(|link| link == target)
+            .count();
+        Some(count)
+    }
+
     fn send_fd_with_data(
         socket_fd: libc::c_int,
         fd_to_send: libc::c_int,
@@ -495,6 +533,47 @@ mod tests {
             libc::CMSG_DATA(cmsg)
                 .cast::<libc::c_int>()
                 .write(fd_to_send);
+            libc::sendmsg(socket_fd, &msg, 0)
+        };
+
+        if written < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(written as usize)
+        }
+    }
+
+    fn send_three_fds_with_data(
+        socket_fd: libc::c_int,
+        fd_to_send: libc::c_int,
+        data: &[u8],
+    ) -> std::io::Result<usize> {
+        let mut data = data.to_vec();
+        let mut iov = libc::iovec {
+            iov_base: data.as_mut_ptr().cast(),
+            iov_len: data.len(),
+        };
+        let mut control = ThreeFdCmsgSpace {
+            bytes: [0; CMSG_SPACE_THREE_FDS],
+        };
+        let fds = [fd_to_send; 3];
+
+        // SAFETY: msghdr and cmsghdr are initialized below before sendmsg.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = unsafe { control.bytes.as_mut_ptr().cast() };
+        msg.msg_controllen = CMSG_SPACE_THREE_FDS;
+
+        // SAFETY: msg has a valid control buffer large enough for three fds.
+        let written = unsafe {
+            let cmsg = libc::CMSG_FIRSTHDR(&msg);
+            (*cmsg).cmsg_level = libc::SOL_SOCKET;
+            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+            (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of_val(&fds) as libc::c_uint) as usize;
+            libc::CMSG_DATA(cmsg)
+                .cast::<libc::c_int>()
+                .copy_from_nonoverlapping(fds.as_ptr(), fds.len());
             libc::sendmsg(socket_fd, &msg, 0)
         };
 
