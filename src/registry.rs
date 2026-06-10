@@ -95,6 +95,15 @@ mod tests {
         assert_eq!(1, h1.next().await.unwrap());
         reg.stop().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn can_create_multiple_registries() {
+        let reg1 = Registry::new();
+        let reg2 = Registry::new();
+
+        reg1.stop().await.unwrap();
+        reg2.stop().await.unwrap();
+    }
 }
 
 #[derive(Debug)]
