@@ -420,7 +420,7 @@ fn livecount_index() -> impl Filter<Extract = (impl warp::Reply,), Error = warp:
 <head>
 </head>
 <body>
-Live counter: <span id="counter"></div>
+Live counter: <span id="counter"></span>
 </body>
 <script>
 var socket;
