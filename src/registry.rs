@@ -182,7 +182,6 @@ impl Registry {
                     let (ctx, crx) = mpsc::channel(CHANNEL_SIZE);
 
                     let entry = key_map.entry(key.to_owned()).or_default();
-                    let count = entry.len() + 1;
                     current_id += 1;
                     let id = current_id;
                     entry.insert(id);
@@ -208,8 +207,12 @@ impl Registry {
                         tx_map.remove(&removed);
                     }
 
+                    let count = entry.len();
                     TOTAL_ACTIVE.set(i64::try_from(tx_map.len()).unwrap());
-                    PAGE_ACTIVE.with_label_values(&[&key]).inc();
+                    match i64::try_from(count) {
+                        Ok(v) => PAGE_ACTIVE.with_label_values(&[&key]).set(v),
+                        Err(e) => error!("Failed to convert {count} to i64 in register: {e}"),
+                    }
                     Self::publish(&tx_map, entry, u64::try_from(count).unwrap()).await;
                     if let Err(err) = ch.send(handle).await {
                         warn!("Failed to send handle back during register(): {}", err);
@@ -244,7 +247,10 @@ impl Registry {
                     }
                     debug!("After unregister: {} active connections", tx_map.len());
                     // TODO: if 0, remove from map.
-                    PAGE_ACTIVE.with_label_values(&[&key]).dec();
+                    match i64::try_from(remaining) {
+                        Ok(v) => PAGE_ACTIVE.with_label_values(&[&key]).set(v),
+                        Err(e) => error!("Failed to convert {remaining} to i64 in unregister: {e}"),
+                    }
                     TOTAL_ACTIVE.set(i64::try_from(tx_map.len()).unwrap());
                 }
                 #[cfg(test)]
