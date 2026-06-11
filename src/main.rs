@@ -108,7 +108,12 @@ async fn metrics_handler() -> Result<impl warp::Reply, warp::Rejection> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("Running");
+    println!(
+        "Livecount {} built with {} ({})",
+        env!("GIT_VERSION"),
+        env!("RUSTC_VERSION"),
+        env!("BUILD_PROFILE")
+    );
 
     let opt = Opt::parse();
     stderrlog::new()
